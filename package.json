@@ -1,0 +1,13 @@
+{
+  "name": "office-heist",
+  "version": "0.1.0",
+  "description": "Original browser-based social deduction game: crew does office chores while a mole sabotages.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}
