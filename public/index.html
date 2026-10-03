@@ -3,14 +3,14 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Office Heist</title>
+<title>Crewmates</title>
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
 
 <div id="screen-menu" class="screen active">
-  <h1>Office Heist</h1>
-  <p class="tagline">One of you isn't here to work.</p>
+  <h1>Crewmates</h1>
+  <p class="tagline">One of you is not a crewmate.</p>
   <input id="name-input" type="text" placeholder="Your name" maxlength="16" />
 
   <div class="menu-card">
@@ -37,6 +37,7 @@
 <div id="screen-game" class="screen">
   <div id="hud">
     <div id="hud-left">Tasks: <span id="hud-tasks">0/0</span></div>
+    <button id="call-meeting-btn" class="skip-btn">Call Meeting</button>
     <div id="hud-role" class="hud-role"></div>
   </div>
   <div id="canvas-wrap">

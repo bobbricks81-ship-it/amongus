@@ -81,10 +81,14 @@ const taskLabel = document.getElementById('task-label');
 const taskBarFill = document.getElementById('task-bar-fill');
 const flashEl = document.getElementById('flash');
 
+const callMeetingBtn = document.getElementById('call-meeting-btn');
+callMeetingBtn.addEventListener('click', () => socket.emit('call-meeting'));
+
 function renderHud(state) {
   hudTasks.textContent = `${state.doneTasks}/${state.totalTasks}`;
-  hudRole.textContent = state.youAreMole ? '\u{1F977} MOLE' : '\u{1F4BC} CREW';
+  hudRole.textContent = state.youAreMole ? '\u{1F52A} IMPOSTOR' : '\u{1F680} CREWMATE';
   hudRole.className = 'hud-role ' + (state.youAreMole ? 'mole' : 'crew');
+  callMeetingBtn.disabled = !state.canCallMeeting;
 }
 
 // ---------- Visual effects state ----------
@@ -156,41 +160,41 @@ function drawTaskIcon(id, x, y) {
   ctx.fillStyle = '#cfd3dc';
   ctx.lineWidth = 2.5;
   switch (id) {
-    case 'coffee':
-      ctx.beginPath(); ctx.moveTo(-10, -6); ctx.lineTo(-10, 10); ctx.quadraticCurveTo(-10, 16, -4, 16);
-      ctx.lineTo(4, 16); ctx.quadraticCurveTo(10, 16, 10, 10); ctx.lineTo(10, -6); ctx.closePath(); ctx.stroke();
-      ctx.beginPath(); ctx.arc(12, 2, 5, -1.2, 1.2); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(-7, -10); ctx.quadraticCurveTo(-4, -16, -1, -10); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(2, -10); ctx.quadraticCurveTo(5, -16, 8, -10); ctx.stroke();
+    case 'wiring':
+      ctx.strokeStyle = '#e05555'; ctx.beginPath(); ctx.moveTo(-14, -10); ctx.quadraticCurveTo(0, 6, -14, 12); ctx.stroke();
+      ctx.strokeStyle = '#55c77a'; ctx.beginPath(); ctx.moveTo(-5, -14); ctx.quadraticCurveTo(6, 0, -5, 14); ctx.stroke();
+      ctx.strokeStyle = '#5588e0'; ctx.beginPath(); ctx.moveTo(6, -12); ctx.quadraticCurveTo(16, 0, 6, 10); ctx.stroke();
       break;
-    case 'server':
-      for (let i = -1; i <= 1; i++) {
-        ctx.strokeRect(-14, i * 11 - 5, 28, 9);
-        ctx.beginPath(); ctx.arc(9, i * 11 - 0.5, 1.6, 0, Math.PI * 2); ctx.fill();
-      }
+    case 'reactor':
+      ctx.beginPath(); ctx.arc(0, 0, 13, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(0, 0, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.save(); ctx.rotate(0.9); ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -11); ctx.stroke(); ctx.restore();
       break;
-    case 'printer':
-      ctx.strokeRect(-14, -4, 28, 14);
-      ctx.strokeRect(-9, -14, 18, 10);
-      ctx.beginPath(); ctx.moveTo(-10, 10); ctx.lineTo(-10, 18); ctx.lineTo(10, 18); ctx.lineTo(10, 10); ctx.stroke();
+    case 'o2':
+      roundRect(-9, -15, 18, 30, 5); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-4, -15); ctx.lineTo(-4, -19); ctx.lineTo(4, -19); ctx.lineTo(4, -15); ctx.stroke();
+      ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('O2', 0, 4);
       break;
-    case 'reports':
-      for (let i = 0; i < 3; i++) {
-        ctx.strokeRect(-12 + i * 2, -12 + i * 4, 20, 24);
-      }
+    case 'navigation':
+      ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI * 2); ctx.stroke();
+      ctx.save(); ctx.rotate(-0.6);
+      ctx.beginPath(); ctx.moveTo(0, -11); ctx.lineTo(3, 0); ctx.lineTo(0, 11); ctx.lineTo(-3, 0); ctx.closePath(); ctx.fill();
+      ctx.restore();
       break;
-    case 'supplies':
-      ctx.strokeRect(-13, -8, 26, 20);
-      ctx.beginPath(); ctx.moveTo(-13, -8); ctx.lineTo(0, -16); ctx.lineTo(13, -8); ctx.stroke();
+    case 'medbay':
+      ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.moveTo(0, -12); ctx.lineTo(0, 12); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-12, 0); ctx.lineTo(12, 0); ctx.stroke();
       break;
-    case 'shred':
-      ctx.strokeRect(-12, -14, 24, 10);
-      ctx.beginPath(); ctx.moveTo(-10, -4); ctx.lineTo(-13, 14); ctx.lineTo(13, 14); ctx.lineTo(10, -4); ctx.closePath(); ctx.stroke();
-      for (let i = -8; i <= 8; i += 4) { ctx.beginPath(); ctx.moveTo(i, -14); ctx.lineTo(i, -4); ctx.stroke(); }
+    case 'electrical':
+      ctx.strokeRect(-12, -14, 24, 28);
+      ctx.beginPath(); ctx.moveTo(2, -10); ctx.lineTo(-6, 2); ctx.lineTo(1, 2); ctx.lineTo(-4, 12); ctx.lineTo(8, -2); ctx.lineTo(1, -2); ctx.closePath();
+      ctx.fill();
       break;
-    case 'mail':
-      ctx.strokeRect(-14, -10, 28, 20);
-      ctx.beginPath(); ctx.moveTo(-14, -10); ctx.lineTo(0, 4); ctx.lineTo(14, -10); ctx.stroke();
+    case 'cafeteria':
+      ctx.beginPath(); ctx.moveTo(-10, -12); ctx.lineTo(-12, 12); ctx.lineTo(12, 12); ctx.lineTo(10, -12); ctx.closePath(); ctx.stroke();
+      for (let i = -6; i <= 6; i += 6) { ctx.beginPath(); ctx.moveTo(i, -10); ctx.lineTo(i, 10); ctx.stroke(); }
+      ctx.beginPath(); ctx.moveTo(-13, -12); ctx.lineTo(13, -12); ctx.stroke();
       break;
     default:
       ctx.beginPath(); ctx.arc(0, 0, 10, 0, Math.PI * 2); ctx.stroke();
@@ -203,14 +207,41 @@ function drawFloor() {
   for (let y = 0; y < canvas.height; y += tile) {
     for (let x = 0; x < canvas.width; x += tile) {
       const even = ((x / tile) + (y / tile)) % 2 === 0;
-      ctx.fillStyle = even ? '#17191f' : '#14161b';
+      ctx.fillStyle = even ? '#1b2430' : '#17202a';
       ctx.fillRect(x, y, tile, tile);
     }
   }
-  ctx.strokeStyle = 'rgba(255,255,255,0.02)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
   ctx.lineWidth = 1;
   for (let x = 0; x <= canvas.width; x += tile) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke(); }
   for (let y = 0; y <= canvas.height; y += tile) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke(); }
+
+  // hull rivets at tile corners
+  ctx.fillStyle = 'rgba(255,255,255,0.05)';
+  for (let y = 0; y <= canvas.height; y += tile) {
+    for (let x = 0; x <= canvas.width; x += tile) {
+      ctx.beginPath(); ctx.arc(x, y, 1.6, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+}
+
+function drawVents(state) {
+  if (!CONFIG || !CONFIG.VENTS) return;
+  for (const v of CONFIG.VENTS) {
+    ctx.save();
+    ctx.translate(v.x, v.y);
+    ctx.fillStyle = '#0c0e12';
+    roundRect(-16, -11, 32, 22, 6);
+    ctx.fill();
+    ctx.strokeStyle = '#3a3d47';
+    ctx.lineWidth = 2;
+    roundRect(-16, -11, 32, 22, 6);
+    ctx.stroke();
+    ctx.strokeStyle = '#51575f';
+    ctx.lineWidth = 2;
+    for (let i = -9; i <= 9; i += 6) { ctx.beginPath(); ctx.moveTo(i, -8); ctx.lineTo(i, 8); ctx.stroke(); }
+    ctx.restore();
+  }
 }
 
 function roundRect(x, y, w, h, r) {
@@ -260,39 +291,56 @@ function isTaskGlowing(state, spot) {
   return dist <= CONFIG.TASK_RANGE;
 }
 
-// ---------- Avatar drawing ----------
+// ---------- Avatar drawing (bean-shaped spacesuit astronaut) ----------
+function drawBeanBody(color, squash = 1) {
+  const grad = ctx.createLinearGradient(-16, -22, -16, 18);
+  grad.addColorStop(0, lighten(color, 24));
+  grad.addColorStop(1, color);
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(-16, 6 * squash);
+  ctx.bezierCurveTo(-16, -14 * squash, -12, -24 * squash, 0, -24 * squash);
+  ctx.bezierCurveTo(12, -24 * squash, 16, -14 * squash, 16, 6 * squash);
+  ctx.bezierCurveTo(16, 16 * squash, 10, 20 * squash, 0, 20 * squash);
+  ctx.bezierCurveTo(-10, 20 * squash, -16, 16 * squash, -16, 6 * squash);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
 function drawAvatar(x, y, color, { alive, name, isSelf, moving, phase, isMole, showMoleTag }) {
   ctx.save();
   ctx.translate(x, y);
 
   if (!alive) {
-    // fallen figure: tipped-over torso + chair/briefcase silhouette
-    ctx.globalAlpha = 0.55;
-    ctx.rotate(Math.PI / 2);
-    ctx.fillStyle = color;
-    roundRect(-16, -11, 32, 22, 8);
-    ctx.fill();
-    ctx.fillStyle = '#0e0f13';
-    ctx.beginPath(); ctx.arc(14, 0, 8, 0, Math.PI * 2); ctx.fill();
-    ctx.restore();
+    // bean tipped on its side with a bone, Among-Us "ghosted" style
+    ctx.globalAlpha = 0.6;
     ctx.save();
-    ctx.translate(x, y);
-    ctx.globalAlpha = 0.55;
-    ctx.fillStyle = '#b02020';
-    ctx.font = 'bold 14px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('✕', 0, -20);
+    ctx.rotate(Math.PI / 2);
+    drawBeanBody(color, 0.82);
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    roundRect(-16, -2, 32, 10, 5);
+    ctx.fill();
     ctx.restore();
-    drawNameTag(x, y - 34, name + ' (down)', '#e07f7f');
+    ctx.fillStyle = '#e8e8e8';
+    ctx.strokeStyle = '#cfcfcf';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(16, 4, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(24, 2, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillRect(15, 1, 10, 4);
+    ctx.restore();
+    drawNameTag(x, y - 30, name, '#9aa0ad');
     return;
   }
 
   const bob = moving ? Math.sin(phase) * 2 : 0;
-  const legSwing = moving ? Math.sin(phase * 1.6) * 7 : 0;
+  const legSwing = moving ? Math.sin(phase * 1.6) * 6 : 0;
 
   // shadow
   ctx.beginPath();
-  ctx.ellipse(0, 20, 15, 5, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 21, 15, 5, 0, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(0,0,0,0.35)';
   ctx.fill();
 
@@ -300,62 +348,56 @@ function drawAvatar(x, y, color, { alive, name, isSelf, moving, phase, isMole, s
 
   // legs
   ctx.strokeStyle = '#2a2d35';
-  ctx.lineWidth = 5;
+  ctx.lineWidth = 6;
   ctx.lineCap = 'round';
-  ctx.beginPath(); ctx.moveTo(-5, 10); ctx.lineTo(-5 + legSwing * 0.3, 19); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(5, 10); ctx.lineTo(5 - legSwing * 0.3, 19); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-7, 15); ctx.lineTo(-7 + legSwing * 0.3, 22); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(7, 15); ctx.lineTo(7 - legSwing * 0.3, 22); ctx.stroke();
 
-  // torso
-  const grad = ctx.createLinearGradient(-15, -16, -15, 14);
-  grad.addColorStop(0, lighten(color, 18));
-  grad.addColorStop(1, color);
-  ctx.fillStyle = grad;
-  roundRect(-15, -16, 30, 30, 12);
+  // backpack
+  ctx.fillStyle = lighten(color, -20);
+  roundRect(-21, -8, 8, 16, 4);
+  ctx.fill();
+
+  // bean body
+  drawBeanBody(color);
+
+  // visor
+  const visorGrad = ctx.createLinearGradient(-8, -20, 14, -10);
+  visorGrad.addColorStop(0, '#bfe9ff');
+  visorGrad.addColorStop(0.55, '#8fd0f2');
+  visorGrad.addColorStop(1, '#5a9ec2');
+  ctx.fillStyle = visorGrad;
+  ctx.beginPath();
+  ctx.ellipse(2, -18, 11, 8, -0.15, 0, Math.PI * 2);
   ctx.fill();
   ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-  ctx.lineWidth = 1.5;
-  roundRect(-15, -16, 30, 30, 12);
-  ctx.stroke();
-
-  // collar / tie
-  ctx.fillStyle = '#f3f3f3';
-  ctx.beginPath();
-  ctx.moveTo(-6, -16); ctx.lineTo(0, -9); ctx.lineTo(6, -16);
-  ctx.closePath(); ctx.fill();
-  ctx.fillStyle = isMole && showMoleTag ? '#b02020' : '#3a3d47';
-  ctx.beginPath();
-  ctx.moveTo(-3, -10); ctx.lineTo(3, -10); ctx.lineTo(2, 8); ctx.lineTo(0, 12); ctx.lineTo(-2, 8);
-  ctx.closePath(); ctx.fill();
-
-  // head
-  ctx.beginPath();
-  ctx.fillStyle = '#f0c9a0';
-  ctx.arc(0, -24, 10, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.25)';
   ctx.lineWidth = 1.2;
   ctx.stroke();
-
-  // face
-  ctx.fillStyle = '#2a2d35';
-  ctx.beginPath(); ctx.arc(-3.5, -25, 1.3, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.arc(3.5, -25, 1.3, 0, Math.PI * 2); ctx.fill();
+  // visor glint
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
   ctx.beginPath();
-  ctx.arc(0, -21, 3, 0.15 * Math.PI, 0.85 * Math.PI);
-  ctx.strokeStyle = '#2a2d35';
-  ctx.lineWidth = 1;
-  ctx.stroke();
+  ctx.ellipse(-1, -21, 3, 1.6, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // impostor tag tint on body seam (only visible to the impostor themself)
+  if (isMole && showMoleTag) {
+    ctx.strokeStyle = 'rgba(176,32,32,0.8)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-14, 8); ctx.lineTo(14, 8);
+    ctx.stroke();
+  }
 
   if (isSelf) {
     ctx.beginPath();
-    ctx.arc(0, -4, 26, 0, Math.PI * 2);
+    ctx.arc(0, -2, 27, 0, Math.PI * 2);
     ctx.strokeStyle = 'rgba(255,255,255,0.18)';
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
 
   ctx.restore();
-  drawNameTag(x, y - 42, name, color);
+  drawNameTag(x, y - 44, name, color);
 }
 
 function drawNameTag(x, y, name, color) {
@@ -386,17 +428,17 @@ function drawBodies(state) {
   for (const body of state.bodies) {
     ctx.save();
     ctx.translate(body.x, body.y);
-    ctx.fillStyle = '#4a3b2a';
-    roundRect(-13, -6, 26, 14, 3);
-    ctx.fill();
-    ctx.fillStyle = '#6b5438';
-    ctx.fillRect(-2, -9, 4, 6);
-    ctx.fillStyle = '#eee';
-    ctx.save(); ctx.rotate(0.3); ctx.fillRect(2, -10, 10, 7); ctx.restore();
-    ctx.fillStyle = '#b02020';
-    ctx.font = 'bold 13px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('✕', 0, -16);
+    ctx.rotate(Math.PI / 2);
+    drawBeanBody(body.color || '#c51111', 0.8);
+    ctx.restore();
+    ctx.save();
+    ctx.translate(body.x, body.y);
+    ctx.fillStyle = '#e8e8e8';
+    ctx.strokeStyle = '#cfcfcf';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(15, 3, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(23, 1, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillRect(14, 0, 10, 4);
     ctx.restore();
   }
 }
@@ -409,6 +451,7 @@ function drawWorld(state) {
   }
 
   drawFloor();
+  if (CONFIG) drawVents(state);
   if (CONFIG) drawTaskStations(state);
   if (!state) { ctx.restore(); return; }
 
@@ -479,10 +522,16 @@ function nearestBody(state) {
   return best;
 }
 
+function nearestVent(state) {
+  if (!state.youAreMole || !CONFIG) return null;
+  return CONFIG.VENTS.find((v) => Math.hypot(myPos.x - v.x, myPos.y - v.y) <= CONFIG.VENT_RANGE) || null;
+}
+
 function updateActionPrompt(state) {
   const task = nearestAssignedTask(state);
   const killTarget = nearestKillTarget(state);
   const body = nearestBody(state);
+  const vent = nearestVent(state);
 
   if (holdingTask) {
     actionPrompt.classList.add('hidden');
@@ -497,6 +546,9 @@ function updateActionPrompt(state) {
   } else if (killTarget) {
     const onCooldown = state.lastKillAt && Date.now() - state.lastKillAt < CONFIG.KILL_COOLDOWN_MS;
     actionPrompt.textContent = onCooldown ? 'Kill on cooldown' : `Press Q to eliminate ${killTarget.name}`;
+    actionPrompt.classList.remove('hidden');
+  } else if (vent) {
+    actionPrompt.textContent = 'Press V to vent';
     actionPrompt.classList.remove('hidden');
   } else if (task) {
     actionPrompt.textContent = `Press E to ${task.label}`;
@@ -520,6 +572,10 @@ window.addEventListener('keydown', (e) => {
   if (e.key.toLowerCase() === 'q') {
     const target = nearestKillTarget(latestState);
     if (target) socket.emit('eliminate', { targetId: target.id });
+  }
+  if (e.key.toLowerCase() === 'v' && latestState.youAreMole) {
+    const nearVent = CONFIG && CONFIG.VENTS.find((v) => Math.hypot(myPos.x - v.x, myPos.y - v.y) <= CONFIG.VENT_RANGE);
+    if (nearVent) socket.emit('use-vent');
   }
   if (e.key.toLowerCase() === 'e' && !holdingTask) {
     const task = nearestAssignedTask(latestState);
@@ -666,13 +722,13 @@ function castVote(targetId) {
 
 // ---------- End screen ----------
 function renderEnd(state) {
-  document.getElementById('end-title').textContent = state.resultMessage?.includes('Mole wins') ? 'Mole Wins' : 'Crew Wins';
+  document.getElementById('end-title').textContent = state.resultMessage?.includes('Impostor wins') ? 'Impostor Wins' : 'Crew Wins';
   document.getElementById('end-message').textContent = state.resultMessage || '';
   const list = document.getElementById('end-roles');
   list.innerHTML = '';
   for (const p of state.players) {
     const li = document.createElement('li');
-    li.innerHTML = `<span class="name-row"><span class="dot" style="background:${p.color};color:${p.color}"></span>${p.name}</span><span>${p.isMole ? 'MOLE' : 'Crew'}</span>`;
+    li.innerHTML = `<span class="name-row"><span class="dot" style="background:${p.color};color:${p.color}"></span>${p.name}</span><span>${p.isMole ? 'IMPOSTOR' : 'Crew'}</span>`;
     list.appendChild(li);
   }
   const me = state.players.find((p) => p.id === myId);

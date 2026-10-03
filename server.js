@@ -13,21 +13,34 @@ const WORLD_H = 600;
 const KILL_RANGE = 55;
 const TASK_RANGE = 45;
 const REPORT_RANGE = 70;
+const VENT_RANGE = 45;
 const KILL_COOLDOWN_MS = 8000;
+const VENT_COOLDOWN_MS = 1500;
 const TASKS_PER_CREW = 3;
 const MEETING_DURATION_MS = 45000;
+const MAX_PLAYERS = 10;
 
 const TASK_SPOTS = [
-  { id: 'coffee', label: 'Make Coffee', x: 110, y: 110 },
-  { id: 'server', label: 'Reboot Server', x: 690, y: 110 },
-  { id: 'printer', label: 'Fix Printer Jam', x: 110, y: 490 },
-  { id: 'reports', label: 'File Reports', x: 690, y: 490 },
-  { id: 'supplies', label: 'Count Supplies', x: 400, y: 300 },
-  { id: 'shred', label: 'Shred Documents', x: 400, y: 110 },
-  { id: 'mail', label: 'Sort Mail', x: 400, y: 490 },
+  { id: 'wiring', label: 'Fix Wiring', x: 110, y: 110 },
+  { id: 'reactor', label: 'Start Reactor', x: 690, y: 110 },
+  { id: 'o2', label: 'Empty O2', x: 110, y: 490 },
+  { id: 'navigation', label: 'Chart Course', x: 690, y: 490 },
+  { id: 'medbay', label: 'Submit Scan', x: 400, y: 300 },
+  { id: 'electrical', label: 'Divert Power', x: 400, y: 110 },
+  { id: 'cafeteria', label: 'Empty Garbage', x: 400, y: 490 },
 ];
 
-const COLORS = ['#e05555', '#5588e0', '#55b56b', '#e0b955', '#b065d6', '#e07fb0', '#55c7c0', '#e0893f'];
+// Paired vents: an impostor standing near one can warp to another in the same group.
+const VENTS = [
+  { id: 'vent-a1', group: 'a', x: 230, y: 110 },
+  { id: 'vent-a2', group: 'a', x: 230, y: 490 },
+  { id: 'vent-b1', group: 'b', x: 570, y: 110 },
+  { id: 'vent-b2', group: 'b', x: 570, y: 490 },
+  { id: 'vent-c1', group: 'c', x: 290, y: 300 },
+  { id: 'vent-c2', group: 'c', x: 510, y: 300 },
+];
+
+const COLORS = ['#c51111', '#132ed1', '#117f2d', '#ed54ba', '#ef7d0d', '#f5f557', '#3f474e', '#d6e0f0', '#6b2fbb', '#71491e'];
 
 /** @type {Map<string, Room>} */
 const rooms = new Map();
@@ -63,13 +76,14 @@ function roomSnapshot(room, forPlayerId) {
       ...publicPlayer(p),
       isMole: revealRoles ? p.isMole : viewer && viewer.id === p.id ? p.isMole : undefined,
     })),
-    bodies: room.bodies.map((b) => ({ id: b.id, x: b.x, y: b.y, victimName: b.victimName })),
+    bodies: room.bodies.map((b) => ({ id: b.id, x: b.x, y: b.y, victimName: b.victimName, color: b.color })),
     totalTasks: room.totalTasks,
     doneTasks: room.doneTasks,
     meetingEndsAt: room.meetingEndsAt || null,
     votes: room.state === 'meeting' ? summarizeVotes(room) : null,
     resultMessage: room.resultMessage || null,
     youAreMole: viewer ? viewer.isMole : false,
+    canCallMeeting: viewer ? viewer.alive && !viewer.meetingUsed : false,
     yourTasks: viewer ? viewer.tasksAssigned.map((id) => ({ id, label: TASK_SPOTS.find((t) => t.id === id).label, done: viewer.tasksDone.includes(id) })) : [],
   };
 }
@@ -107,6 +121,8 @@ function resetRoomToLobby(room) {
     p.tasksDone = [];
     p.x = 400;
     p.y = 300;
+    p.lastVentAt = null;
+    p.meetingUsed = false;
   }
 }
 
@@ -127,6 +143,8 @@ function startGame(room) {
     p.alive = true;
     p.x = 380 + Math.random() * 40;
     p.y = 280 + Math.random() * 40;
+    p.lastVentAt = null;
+    p.meetingUsed = false;
     p.isMole = p.id === molePlayer.id;
     if (p.isMole) {
       p.tasksAssigned = [];
@@ -150,7 +168,7 @@ function checkWinConditions(room) {
     return;
   }
   if (aliveCrew.length === 0) {
-    endGame(room, 'The mole eliminated the whole crew. Mole wins!');
+    endGame(room, 'The impostor eliminated the whole crew. Impostor wins!');
     return;
   }
 }
@@ -198,11 +216,11 @@ function resolveMeeting(room) {
     if (ejected) {
       ejected.alive = false;
       if (ejected.isMole) {
-        endGame(room, `${ejected.name} was ejected. They were the mole. Crew wins!`);
+        endGame(room, `${ejected.name} was ejected. They were the impostor. Crew wins!`);
         broadcastState(room);
         return;
       } else {
-        room.resultMessage = `${ejected.name} was ejected. They were not the mole.`;
+        room.resultMessage = `${ejected.name} was ejected. They were not the impostor.`;
       }
     }
   } else {
@@ -237,6 +255,7 @@ io.on('connection', (socket) => {
       id: socket.id, name: String(name || 'Player').slice(0, 16), x: 400, y: 300,
       alive: true, isMole: false, isHost: true, color,
       tasksAssigned: [], tasksDone: [],
+      lastVentAt: null, meetingUsed: false,
     });
     socket.data.roomCode = code;
     socket.join(code);
@@ -249,12 +268,13 @@ io.on('connection', (socket) => {
     const room = rooms.get(code);
     if (!room) return cb({ ok: false, error: 'Room not found.' });
     if (room.state !== 'lobby') return cb({ ok: false, error: 'Game already in progress.' });
-    if (room.players.size >= 8) return cb({ ok: false, error: 'Room is full.' });
+    if (room.players.size >= MAX_PLAYERS) return cb({ ok: false, error: 'Room is full.' });
     const color = COLORS[room.players.size % COLORS.length];
     room.players.set(socket.id, {
       id: socket.id, name: String(name || 'Player').slice(0, 16), x: 400, y: 300,
       alive: true, isMole: false, isHost: false, color,
       tasksAssigned: [], tasksDone: [],
+      lastVentAt: null, meetingUsed: false,
     });
     socket.data.roomCode = code;
     socket.join(code);
@@ -318,7 +338,7 @@ io.on('connection', (socket) => {
     if (dist > KILL_RANGE) return;
     target.alive = false;
     room.lastKillAt = now;
-    room.bodies.push({ id: `body-${target.id}-${now}`, x: target.x, y: target.y, victimName: target.name });
+    room.bodies.push({ id: `body-${target.id}-${now}`, x: target.x, y: target.y, victimName: target.name, color: target.color });
     checkWinConditions(room);
     broadcastState(room);
   });
@@ -335,6 +355,35 @@ io.on('connection', (socket) => {
     room.bodies = room.bodies.filter((b) => b.id !== bodyId);
     room.resultMessage = `${reporter.name} reported a body!`;
     startMeeting(room);
+    broadcastState(room);
+  });
+
+  socket.on('call-meeting', () => {
+    const room = rooms.get(socket.data.roomCode);
+    if (!room || room.state !== 'playing') return;
+    const caller = room.players.get(socket.id);
+    if (!caller || !caller.alive || caller.meetingUsed) return;
+    caller.meetingUsed = true;
+    room.resultMessage = `${caller.name} called an emergency meeting!`;
+    startMeeting(room);
+    broadcastState(room);
+  });
+
+  socket.on('use-vent', () => {
+    const room = rooms.get(socket.data.roomCode);
+    if (!room || room.state !== 'playing') return;
+    const player = room.players.get(socket.id);
+    if (!player || !player.alive || !player.isMole) return;
+    const now = Date.now();
+    if (player.lastVentAt && now - player.lastVentAt < VENT_COOLDOWN_MS) return;
+    const current = VENTS.find((v) => Math.hypot(player.x - v.x, player.y - v.y) <= VENT_RANGE);
+    if (!current) return;
+    const options = VENTS.filter((v) => v.group === current.group && v.id !== current.id);
+    if (options.length === 0) return;
+    const dest = options[Math.floor(Math.random() * options.length)];
+    player.x = dest.x;
+    player.y = dest.y;
+    player.lastVentAt = now;
     broadcastState(room);
   });
 
@@ -372,8 +421,8 @@ io.on('connection', (socket) => {
 });
 
 app.get('/config', (_req, res) => {
-  res.json({ WORLD_W, WORLD_H, TASK_SPOTS, KILL_RANGE, TASK_RANGE, REPORT_RANGE, KILL_COOLDOWN_MS });
+  res.json({ WORLD_W, WORLD_H, TASK_SPOTS, VENTS, KILL_RANGE, TASK_RANGE, REPORT_RANGE, VENT_RANGE, KILL_COOLDOWN_MS, VENT_COOLDOWN_MS });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Office Heist running on http://localhost:${PORT}`));
+server.listen(PORT, () => console.log(`Crewmates running on http://localhost:${PORT}`));

@@ -1,7 +1,7 @@
 {
   "name": "office-heist",
   "version": "0.1.0",
-  "description": "Original browser-based social deduction game: crew does office chores while a mole sabotages.",
+  "description": "Browser-based social deduction game in the Among Us style: crewmates complete spaceship tasks while an impostor sabotages and eliminates them.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
