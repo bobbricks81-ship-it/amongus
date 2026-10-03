@@ -1,626 +1,448 @@
 const socket = io();
 
-let CONFIG = null;
-let myId = null;
-let latestState = null;
-let myPos = { x: 400, y: 300 };
-const keys = {};
-let holdingTask = null; // taskId currently being held
-let holdProgress = 0;
-const HOLD_DURATION_MS = 1400;
-let lastFrameTime = performance.now();
-
-const screens = {
-  menu: document.getElementById('screen-menu'),
-  lobby: document.getElementById('screen-lobby'),
-  game: document.getElementById('screen-game'),
-  meeting: document.getElementById('screen-meeting'),
-  end: document.getElementById('screen-end'),
-};
-
-function showScreen(name) {
-  for (const key of Object.keys(screens)) {
-    screens[key].classList.toggle('active', key === name);
-  }
-}
-
+let CONFIG = { KILL_RANGE: 80, TASK_RANGE: 70, USE_RANGE: 80, REPORT_RANGE: 100, VENT_RANGE: 60 };
 fetch('/config').then((r) => r.json()).then((cfg) => { CONFIG = cfg; });
 
+const SPOTS = Object.fromEntries(MAP.TASK_SPOTS.map((s) => [s.id, s]));
+const TASK_OPTS = {
+  'caf-garbage': { verb: 'PULL', hint: 'Hold the lever to empty the chute.' },
+  'storage-fuel': { verb: 'FILL', hint: 'Hold to fill the gas can.' },
+  comms: { verb: 'DOWNLOAD', hint: 'Start the download and wait for it.' },
+  medbay: { verb: 'SCAN', hint: 'Step on the scanner and hold still.' },
+  'nav-course': { count: 5 },
+  o2: { hint: 'Pull every red leaf out of the filter.' },
+  shields: { hint: 'Click every red panel to prime the shields.' },
+};
+const SABOTAGE_NAMES = { lights: 'Lights', reactor: 'Reactor Meltdown', o2: 'Oxygen Depleted', comms: 'Comms' };
+const BASE_SPEED = 230;
+
+let myId = null;
+let S = null; // latest server snapshot
+let clockOffset = 0;
+const serverNow = () => Date.now() + clockOffset;
+const myPos = { x: MAP.EMERGENCY.x, y: MAP.EMERGENCY.y + 80 };
+let myFacing = 1;
+const myWalk = { phase: 0, moving: false };
+const remote = new Map(); // id -> smoothed { x, y, facing, phase, moving }
+const keys = {};
+let visionRadius = 360;
+let mapMode = null; // 'map' | 'sabotage' | 'admin'
+let camsOpen = false;
+let splashUntil = 0;
+let splashTimer = null;
+let voteSelection = null;
+let lastFrameTime = performance.now();
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+const iconImg = (color) => `<img src="${crewIcon(color)}" alt="" />`;
+
+const screens = { menu: $('screen-menu'), lobby: $('screen-lobby'), game: $('screen-game') };
+function showScreen(name) {
+  for (const key of Object.keys(screens)) screens[key].classList.toggle('active', key === name);
+}
+
+// ---------- Sound ----------
+let audio = null;
+function beep(freq, at, dur, type, vol) {
+  const osc = audio.createOscillator();
+  const gain = audio.createGain();
+  osc.type = type || 'square';
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(vol || 0.06, audio.currentTime + at);
+  gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + at + dur);
+  osc.connect(gain).connect(audio.destination);
+  osc.start(audio.currentTime + at);
+  osc.stop(audio.currentTime + at + dur);
+}
+function sfx(kind) {
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    if (kind === 'task') { beep(660, 0, 0.12); beep(880, 0.12, 0.2); }
+    if (kind === 'kill') { beep(140, 0, 0.35, 'sawtooth', 0.12); beep(70, 0.1, 0.4, 'sawtooth', 0.12); }
+    if (kind === 'meeting') { beep(520, 0, 0.18); beep(390, 0.2, 0.18); beep(520, 0.4, 0.18); beep(390, 0.6, 0.3); }
+    if (kind === 'alarm') { beep(300, 0, 0.25, 'sawtooth', 0.08); beep(300, 0.4, 0.25, 'sawtooth', 0.08); }
+    if (kind === 'vote') beep(740, 0, 0.1);
+  } catch (err) { /* no audio available */ }
+}
+
 // ---------- Menu ----------
-const nameInput = document.getElementById('name-input');
-const menuError = document.getElementById('menu-error');
+const nameInput = $('name-input');
+const menuError = $('menu-error');
 
-document.getElementById('create-btn').addEventListener('click', () => {
-  const name = nameInput.value.trim() || 'Player';
-  socket.emit('create-room', name, (res) => {
-    if (!res.ok) return (menuError.textContent = res.error || 'Could not create room.');
-    menuError.textContent = '';
+$('create-btn').addEventListener('click', () => {
+  socket.emit('create-room', nameInput.value.trim() || 'Player', (res) => {
+    menuError.textContent = res.ok ? '' : res.error || 'Could not create room.';
   });
 });
-
-document.getElementById('join-btn').addEventListener('click', () => {
-  const name = nameInput.value.trim() || 'Player';
-  const roomCode = document.getElementById('join-code-input').value.trim().toUpperCase();
+function joinRoom() {
+  const roomCode = $('join-code-input').value.trim().toUpperCase();
   if (!roomCode) return (menuError.textContent = 'Enter a room code.');
-  socket.emit('join-room', { roomCode, name }, (res) => {
-    if (!res.ok) return (menuError.textContent = res.error || 'Could not join room.');
-    menuError.textContent = '';
+  socket.emit('join-room', { roomCode, name: nameInput.value.trim() || 'Player' }, (res) => {
+    menuError.textContent = res.ok ? '' : res.error || 'Could not join room.';
   });
-});
+}
+$('join-btn').addEventListener('click', joinRoom);
+$('join-code-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') joinRoom(); });
 
 // ---------- Lobby ----------
-document.getElementById('start-btn').addEventListener('click', () => socket.emit('start-game'));
-document.getElementById('again-btn').addEventListener('click', () => socket.emit('play-again'));
-document.getElementById('vote-skip-btn').addEventListener('click', () => castVote('skip'));
+const SETTING_DEFS = [
+  ['impostors', 'Impostors', [1, 2, 3], ''],
+  ['killCooldown', 'Kill cooldown', [10, 15, 20, 25, 30, 45], 's'],
+  ['tasks', 'Tasks each', [2, 3, 4, 5, 6, 8], ''],
+  ['speed', 'Player speed', [0.75, 1, 1.25, 1.5], 'x'],
+  ['discussionTime', 'Discussion time', [0, 15, 30, 45], 's'],
+  ['votingTime', 'Voting time', [30, 60, 90, 120], 's'],
+];
+const settingSelects = {};
+for (const [key, label, values, unit] of SETTING_DEFS) {
+  const select = document.createElement('select');
+  for (const v of values) select.add(new Option(`${v}${unit}`, v));
+  select.addEventListener('change', () => socket.emit('set-settings', { [key]: Number(select.value) }));
+  settingSelects[key] = select;
+  const name = document.createElement('span');
+  name.textContent = label;
+  $('settings').append(name, select);
+}
+COLORS.forEach((col, i) => {
+  const sw = document.createElement('button');
+  sw.className = 'swatch';
+  sw.style.background = col.hex;
+  sw.title = col.name;
+  sw.addEventListener('click', () => socket.emit('set-color', { color: i }));
+  $('color-picker').appendChild(sw);
+});
+$('start-btn').addEventListener('click', () => socket.emit('start-game'));
+$('add-bot-btn').addEventListener('click', () => socket.emit('add-bot'));
+$('again-btn').addEventListener('click', () => socket.emit('play-again'));
 
-function renderLobby(state) {
-  document.getElementById('lobby-code').textContent = state.code;
-  const list = document.getElementById('lobby-players');
+function renderLobby(st) {
+  const me = st.players.find((p) => p.id === myId);
+  const host = !!(me && me.isHost);
+  $('lobby-code').textContent = st.code;
+  $('lobby-count').textContent = `${st.players.length}/12`;
+  const list = $('lobby-players');
   list.innerHTML = '';
-  const me = state.players.find((p) => p.id === myId);
-  for (const p of state.players) {
+  for (const p of st.players) {
     const li = document.createElement('li');
-    li.innerHTML = `<span class="name-row"><span class="dot" style="background:${p.color};color:${p.color}"></span>${p.name}${p.isHost ? '<span class="host-tag">HOST</span>' : ''}</span>`;
+    li.innerHTML = `${iconImg(p.color)}<span>${esc(p.name)}</span>`
+      + (p.isHost ? '<span class="host-tag">HOST</span>' : '')
+      + (p.id === myId ? '<span class="you-tag">YOU</span>' : '')
+      + (p.isBot ? '<span class="you-tag">AI</span>' : '');
+    if (p.isBot && host) {
+      const rm = document.createElement('button');
+      rm.textContent = '×';
+      rm.style.cssText = 'padding:0 10px;margin-left:auto;box-shadow:none';
+      rm.addEventListener('click', () => socket.emit('remove-bot', { id: p.id }));
+      li.appendChild(rm);
+    }
     list.appendChild(li);
   }
-  document.getElementById('start-btn').classList.toggle('hidden', !me || !me.isHost);
-  document.getElementById('lobby-hint').classList.toggle('hidden', !!(me && me.isHost));
-  if (me && me.isHost) {
-    document.getElementById('start-btn').disabled = state.players.length < 2;
+  const taken = new Set(st.players.map((p) => p.color));
+  [...$('color-picker').children].forEach((sw, i) => {
+    sw.classList.toggle('mine', !!me && me.color === i);
+    sw.classList.toggle('taken', taken.has(i) && !(me && me.color === i));
+  });
+  for (const [key] of SETTING_DEFS) {
+    settingSelects[key].value = st.settings[key];
+    settingSelects[key].disabled = !host;
   }
+  $('start-btn').classList.toggle('hidden', !host);
+  $('add-bot-btn').classList.toggle('hidden', !host || st.players.length >= 12);
+  $('start-btn').disabled = st.players.length < 2;
+  $('lobby-hint').textContent = host
+    ? (st.players.length < 2 ? 'You need at least 2 players. Add AI players to fill the ship.' : 'Ready when you are.')
+    : 'Waiting for the host to start…';
 }
 
-// ---------- Game rendering ----------
-const canvas = document.getElementById('game-canvas');
+// ---------- Splash + toast ----------
+const splash = $('splash');
+function showSplash(cls, html, ms) {
+  splash.className = cls;
+  splash.innerHTML = html;
+  clearTimeout(splashTimer);
+  splashUntil = performance.now() + ms;
+  splashTimer = setTimeout(() => splash.classList.add('hidden'), ms);
+}
+let toastTimer = null;
+function toast(text) {
+  $('toast').textContent = text;
+  $('toast').classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $('toast').classList.add('hidden'), 1500);
+}
+
+// ---------- World helpers ----------
+const canvas = $('game-canvas');
 const ctx = canvas.getContext('2d');
-const hudTasks = document.getElementById('hud-tasks');
-const hudRole = document.getElementById('hud-role');
-const actionPrompt = document.getElementById('action-prompt');
-const taskOverlay = document.getElementById('task-overlay');
-const taskLabel = document.getElementById('task-label');
-const taskBarFill = document.getElementById('task-bar-fill');
-const flashEl = document.getElementById('flash');
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
 
-const callMeetingBtn = document.getElementById('call-meeting-btn');
-callMeetingBtn.addEventListener('click', () => socket.emit('call-meeting'));
-
-function renderHud(state) {
-  hudTasks.textContent = `${state.doneTasks}/${state.totalTasks}`;
-  hudRole.textContent = state.youAreMole ? '\u{1F52A} IMPOSTOR' : '\u{1F680} CREWMATE';
-  hudRole.className = 'hud-role ' + (state.youAreMole ? 'mole' : 'crew');
-  callMeetingBtn.disabled = !state.canCallMeeting;
+function closedDoorRects() {
+  if (!S) return [];
+  const t = serverNow();
+  return MAP.closedDoors(Object.keys(S.doors).filter((id) => S.doors[id].closedUntil > t));
 }
 
-// ---------- Visual effects state ----------
-const renderPositions = new Map(); // id -> {x,y} smoothed position for remote players
-const walkPhase = new Map(); // id -> {phase, moving}
-let particles = []; // {x,y,vx,vy,life,maxLife,color,size,shape}
-let shake = { t: 0, mag: 0 };
-let prevAliveById = new Map();
-let prevMyDoneTaskIds = new Set();
+function inputBlocked() {
+  return !S || S.state !== 'playing' || !!activeGame || !!mapMode || camsOpen || performance.now() < splashUntil;
+}
 
-function spawnBurst(x, y, color, count, opts = {}) {
-  for (let i = 0; i < count; i++) {
-    const angle = Math.random() * Math.PI * 2;
-    const speed = (opts.speed || 90) * (0.5 + Math.random());
-    particles.push({
-      x, y,
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed - (opts.lift || 40),
-      life: 0,
-      maxLife: 0.6 + Math.random() * 0.5,
-      color,
-      size: opts.size || 3 + Math.random() * 3,
-      shape: opts.shape || 'paper',
-    });
+function activePanels() {
+  if (!S || !S.sabotage) return [];
+  return MAP.PANELS.filter((p) => p.sabotage === S.sabotage.type && !(S.sabotage.done && S.sabotage.done[p.id]));
+}
+
+function myTodoIds() {
+  const ids = new Set();
+  if (S && S.you && !S.you.isImpostor) for (const t of S.you.tasks) if (!t.done) ids.add(t.id);
+  return ids;
+}
+
+const distTo = (spot) => Math.hypot(myPos.x - spot.x, myPos.y - spot.y);
+
+function useTarget() {
+  const you = S.you;
+  const found = [];
+  const add = (kind, spot, range, rank) => {
+    const d = distTo(spot);
+    if (d <= range - 8) found.push({ kind, spot, d: d + rank });
+  };
+  for (const id of myTodoIds()) add('task', SPOTS[id], CONFIG.TASK_RANGE, 0);
+  if (you.alive) {
+    for (const p of activePanels()) add('panel', p, CONFIG.USE_RANGE, -1000);
+    add('emergency', MAP.EMERGENCY, CONFIG.USE_RANGE, 0);
+    add('security', MAP.SECURITY_CONSOLE, CONFIG.USE_RANGE, 0);
+    add('admin', MAP.ADMIN_TABLE, CONFIG.USE_RANGE, 0);
   }
+  found.sort((a, b) => a.d - b.d);
+  return found[0] || null;
 }
 
-function triggerShake(mag) { shake.t = 0.35; shake.mag = mag; }
-function triggerFlash() {
-  flashEl.classList.add('active');
-  setTimeout(() => flashEl.classList.remove('active'), 140);
-}
-
-function updateEffects(dt) {
-  particles = particles.filter((p) => p.life < p.maxLife);
-  for (const p of particles) {
-    p.life += dt;
-    p.vy += 160 * dt; // gravity
-    p.x += p.vx * dt;
-    p.y += p.vy * dt;
-  }
-  if (shake.t > 0) shake.t = Math.max(0, shake.t - dt);
-}
-
-function drawParticles() {
-  for (const p of particles) {
-    const alpha = Math.max(0, 1 - p.life / p.maxLife);
-    ctx.save();
-    ctx.globalAlpha = alpha;
-    ctx.translate(p.x, p.y);
-    ctx.rotate(p.life * 6);
-    ctx.fillStyle = p.color;
-    if (p.shape === 'paper') {
-      ctx.fillRect(-p.size, -p.size * 0.7, p.size * 2, p.size * 1.4);
-    } else {
-      ctx.beginPath();
-      ctx.arc(0, 0, p.size, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.restore();
-  }
-}
-
-// ---------- Themed task station icons ----------
-function drawTaskIcon(id, x, y) {
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.strokeStyle = '#cfd3dc';
-  ctx.fillStyle = '#cfd3dc';
-  ctx.lineWidth = 2.5;
-  switch (id) {
-    case 'wiring':
-      ctx.strokeStyle = '#e05555'; ctx.beginPath(); ctx.moveTo(-14, -10); ctx.quadraticCurveTo(0, 6, -14, 12); ctx.stroke();
-      ctx.strokeStyle = '#55c77a'; ctx.beginPath(); ctx.moveTo(-5, -14); ctx.quadraticCurveTo(6, 0, -5, 14); ctx.stroke();
-      ctx.strokeStyle = '#5588e0'; ctx.beginPath(); ctx.moveTo(6, -12); ctx.quadraticCurveTo(16, 0, 6, 10); ctx.stroke();
-      break;
-    case 'reactor':
-      ctx.beginPath(); ctx.arc(0, 0, 13, 0, Math.PI * 2); ctx.stroke();
-      ctx.beginPath(); ctx.arc(0, 0, 3, 0, Math.PI * 2); ctx.fill();
-      ctx.save(); ctx.rotate(0.9); ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -11); ctx.stroke(); ctx.restore();
-      break;
-    case 'o2':
-      roundRect(-9, -15, 18, 30, 5); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(-4, -15); ctx.lineTo(-4, -19); ctx.lineTo(4, -19); ctx.lineTo(4, -15); ctx.stroke();
-      ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('O2', 0, 4);
-      break;
-    case 'navigation':
-      ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI * 2); ctx.stroke();
-      ctx.save(); ctx.rotate(-0.6);
-      ctx.beginPath(); ctx.moveTo(0, -11); ctx.lineTo(3, 0); ctx.lineTo(0, 11); ctx.lineTo(-3, 0); ctx.closePath(); ctx.fill();
-      ctx.restore();
-      break;
-    case 'medbay':
-      ctx.lineWidth = 4;
-      ctx.beginPath(); ctx.moveTo(0, -12); ctx.lineTo(0, 12); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(-12, 0); ctx.lineTo(12, 0); ctx.stroke();
-      break;
-    case 'electrical':
-      ctx.strokeRect(-12, -14, 24, 28);
-      ctx.beginPath(); ctx.moveTo(2, -10); ctx.lineTo(-6, 2); ctx.lineTo(1, 2); ctx.lineTo(-4, 12); ctx.lineTo(8, -2); ctx.lineTo(1, -2); ctx.closePath();
-      ctx.fill();
-      break;
-    case 'cafeteria':
-      ctx.beginPath(); ctx.moveTo(-10, -12); ctx.lineTo(-12, 12); ctx.lineTo(12, 12); ctx.lineTo(10, -12); ctx.closePath(); ctx.stroke();
-      for (let i = -6; i <= 6; i += 6) { ctx.beginPath(); ctx.moveTo(i, -10); ctx.lineTo(i, 10); ctx.stroke(); }
-      ctx.beginPath(); ctx.moveTo(-13, -12); ctx.lineTo(13, -12); ctx.stroke();
-      break;
-    default:
-      ctx.beginPath(); ctx.arc(0, 0, 10, 0, Math.PI * 2); ctx.stroke();
-  }
-  ctx.restore();
-}
-
-function drawFloor() {
-  const tile = 50;
-  for (let y = 0; y < canvas.height; y += tile) {
-    for (let x = 0; x < canvas.width; x += tile) {
-      const even = ((x / tile) + (y / tile)) % 2 === 0;
-      ctx.fillStyle = even ? '#1b2430' : '#17202a';
-      ctx.fillRect(x, y, tile, tile);
-    }
-  }
-  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-  ctx.lineWidth = 1;
-  for (let x = 0; x <= canvas.width; x += tile) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke(); }
-  for (let y = 0; y <= canvas.height; y += tile) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke(); }
-
-  // hull rivets at tile corners
-  ctx.fillStyle = 'rgba(255,255,255,0.05)';
-  for (let y = 0; y <= canvas.height; y += tile) {
-    for (let x = 0; x <= canvas.width; x += tile) {
-      ctx.beginPath(); ctx.arc(x, y, 1.6, 0, Math.PI * 2); ctx.fill();
-    }
-  }
-}
-
-function drawVents(state) {
-  if (!CONFIG || !CONFIG.VENTS) return;
-  for (const v of CONFIG.VENTS) {
-    ctx.save();
-    ctx.translate(v.x, v.y);
-    ctx.fillStyle = '#0c0e12';
-    roundRect(-16, -11, 32, 22, 6);
-    ctx.fill();
-    ctx.strokeStyle = '#3a3d47';
-    ctx.lineWidth = 2;
-    roundRect(-16, -11, 32, 22, 6);
-    ctx.stroke();
-    ctx.strokeStyle = '#51575f';
-    ctx.lineWidth = 2;
-    for (let i = -9; i <= 9; i += 6) { ctx.beginPath(); ctx.moveTo(i, -8); ctx.lineTo(i, 8); ctx.stroke(); }
-    ctx.restore();
-  }
-}
-
-function roundRect(x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
-}
-
-function drawTaskStations(state) {
-  if (!CONFIG) return;
-  for (const spot of CONFIG.TASK_SPOTS) {
-    const inRange = isTaskGlowing(state, spot);
-    ctx.save();
-    if (inRange) {
-      ctx.shadowColor = 'rgba(224,185,85,0.6)';
-      ctx.shadowBlur = 22;
-    }
-    const grad = ctx.createLinearGradient(spot.x, spot.y - 40, spot.x, spot.y + 40);
-    grad.addColorStop(0, '#272b35');
-    grad.addColorStop(1, '#1c1f27');
-    ctx.fillStyle = grad;
-    ctx.strokeStyle = inRange ? '#e0b955' : '#3a3d47';
-    ctx.lineWidth = 2;
-    roundRect(spot.x - 55, spot.y - 40, 110, 80, 12);
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
-
-    drawTaskIcon(spot.id, spot.x, spot.y - 6);
-
-    ctx.fillStyle = '#9aa0ad';
-    ctx.font = '12px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(spot.label, spot.x, spot.y + 32);
-  }
-}
-
-function isTaskGlowing(state, spot) {
-  if (!state || state.youAreMole) return false;
-  const task = state.yourTasks.find((t) => t.id === spot.id && !t.done);
-  if (!task) return false;
-  const dist = Math.hypot(myPos.x - spot.x, myPos.y - spot.y);
-  return dist <= CONFIG.TASK_RANGE;
-}
-
-// ---------- Avatar drawing (bean-shaped spacesuit astronaut) ----------
-function drawBeanBody(color, squash = 1) {
-  const grad = ctx.createLinearGradient(-16, -22, -16, 18);
-  grad.addColorStop(0, lighten(color, 24));
-  grad.addColorStop(1, color);
-  ctx.fillStyle = grad;
-  ctx.beginPath();
-  ctx.moveTo(-16, 6 * squash);
-  ctx.bezierCurveTo(-16, -14 * squash, -12, -24 * squash, 0, -24 * squash);
-  ctx.bezierCurveTo(12, -24 * squash, 16, -14 * squash, 16, 6 * squash);
-  ctx.bezierCurveTo(16, 16 * squash, 10, 20 * squash, 0, 20 * squash);
-  ctx.bezierCurveTo(-10, 20 * squash, -16, 16 * squash, -16, 6 * squash);
-  ctx.closePath();
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-}
-
-function drawAvatar(x, y, color, { alive, name, isSelf, moving, phase, isMole, showMoleTag }) {
-  ctx.save();
-  ctx.translate(x, y);
-
-  if (!alive) {
-    // bean tipped on its side with a bone, Among-Us "ghosted" style
-    ctx.globalAlpha = 0.6;
-    ctx.save();
-    ctx.rotate(Math.PI / 2);
-    drawBeanBody(color, 0.82);
-    ctx.fillStyle = 'rgba(0,0,0,0.25)';
-    roundRect(-16, -2, 32, 10, 5);
-    ctx.fill();
-    ctx.restore();
-    ctx.fillStyle = '#e8e8e8';
-    ctx.strokeStyle = '#cfcfcf';
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.arc(16, 4, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    ctx.beginPath(); ctx.arc(24, 2, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    ctx.fillRect(15, 1, 10, 4);
-    ctx.restore();
-    drawNameTag(x, y - 30, name, '#9aa0ad');
-    return;
-  }
-
-  const bob = moving ? Math.sin(phase) * 2 : 0;
-  const legSwing = moving ? Math.sin(phase * 1.6) * 6 : 0;
-
-  // shadow
-  ctx.beginPath();
-  ctx.ellipse(0, 21, 15, 5, 0, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
-  ctx.fill();
-
-  ctx.translate(0, bob);
-
-  // legs
-  ctx.strokeStyle = '#2a2d35';
-  ctx.lineWidth = 6;
-  ctx.lineCap = 'round';
-  ctx.beginPath(); ctx.moveTo(-7, 15); ctx.lineTo(-7 + legSwing * 0.3, 22); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(7, 15); ctx.lineTo(7 - legSwing * 0.3, 22); ctx.stroke();
-
-  // backpack
-  ctx.fillStyle = lighten(color, -20);
-  roundRect(-21, -8, 8, 16, 4);
-  ctx.fill();
-
-  // bean body
-  drawBeanBody(color);
-
-  // visor
-  const visorGrad = ctx.createLinearGradient(-8, -20, 14, -10);
-  visorGrad.addColorStop(0, '#bfe9ff');
-  visorGrad.addColorStop(0.55, '#8fd0f2');
-  visorGrad.addColorStop(1, '#5a9ec2');
-  ctx.fillStyle = visorGrad;
-  ctx.beginPath();
-  ctx.ellipse(2, -18, 11, 8, -0.15, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-  ctx.lineWidth = 1.2;
-  ctx.stroke();
-  // visor glint
-  ctx.fillStyle = 'rgba(255,255,255,0.55)';
-  ctx.beginPath();
-  ctx.ellipse(-1, -21, 3, 1.6, -0.3, 0, Math.PI * 2);
-  ctx.fill();
-
-  // impostor tag tint on body seam (only visible to the impostor themself)
-  if (isMole && showMoleTag) {
-    ctx.strokeStyle = 'rgba(176,32,32,0.8)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(-14, 8); ctx.lineTo(14, 8);
-    ctx.stroke();
-  }
-
-  if (isSelf) {
-    ctx.beginPath();
-    ctx.arc(0, -2, 27, 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-  }
-
-  ctx.restore();
-  drawNameTag(x, y - 44, name, color);
-}
-
-function drawNameTag(x, y, name, color) {
-  ctx.save();
-  ctx.font = '12px sans-serif';
-  const w = ctx.measureText(name).width + 14;
-  ctx.fillStyle = 'rgba(14,15,19,0.72)';
-  roundRect(x - w / 2, y - 12, w, 17, 8);
-  ctx.fill();
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 1;
-  roundRect(x - w / 2, y - 12, w, 17, 8);
-  ctx.stroke();
-  ctx.fillStyle = '#eef0f4';
-  ctx.textAlign = 'center';
-  ctx.fillText(name, x, y);
-  ctx.restore();
-}
-
-function lighten(hex, amt) {
-  const n = parseInt(hex.slice(1), 16);
-  let r = (n >> 16) + amt, g = ((n >> 8) & 0xff) + amt, b = (n & 0xff) + amt;
-  r = Math.min(255, r); g = Math.min(255, g); b = Math.min(255, b);
-  return `rgb(${r},${g},${b})`;
-}
-
-function drawBodies(state) {
-  for (const body of state.bodies) {
-    ctx.save();
-    ctx.translate(body.x, body.y);
-    ctx.rotate(Math.PI / 2);
-    drawBeanBody(body.color || '#c51111', 0.8);
-    ctx.restore();
-    ctx.save();
-    ctx.translate(body.x, body.y);
-    ctx.fillStyle = '#e8e8e8';
-    ctx.strokeStyle = '#cfcfcf';
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.arc(15, 3, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    ctx.beginPath(); ctx.arc(23, 1, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    ctx.fillRect(14, 0, 10, 4);
-    ctx.restore();
-  }
-}
-
-function drawWorld(state) {
-  ctx.save();
-  if (shake.t > 0) {
-    const m = shake.mag * (shake.t / 0.35);
-    ctx.translate((Math.random() - 0.5) * m, (Math.random() - 0.5) * m);
-  }
-
-  drawFloor();
-  if (CONFIG) drawVents(state);
-  if (CONFIG) drawTaskStations(state);
-  if (!state) { ctx.restore(); return; }
-
-  drawBodies(state);
-
-  const order = [...state.players].sort((a, b) => (a.id === myId ? 1 : 0) - (b.id === myId ? 1 : 0));
-  for (const p of order) {
-    let pos;
-    if (p.id === myId) {
-      pos = myPos;
-    } else {
-      if (!renderPositions.has(p.id)) renderPositions.set(p.id, { x: p.x, y: p.y });
-      pos = renderPositions.get(p.id);
-    }
-    const wp = walkPhase.get(p.id) || { phase: 0, moving: false };
-    drawAvatar(pos.x, pos.y, p.color, {
-      alive: p.alive,
-      name: p.name,
-      isSelf: p.id === myId,
-      moving: wp.moving,
-      phase: wp.phase,
-      isMole: p.isMole,
-      showMoleTag: p.id === myId && state.youAreMole,
-    });
-  }
-
-  drawParticles();
-  ctx.restore();
-}
-
-function nearestAssignedTask(state) {
-  const me = state.players.find((p) => p.id === myId);
-  if (!me || !me.alive || state.youAreMole) return null;
-  for (const t of state.yourTasks) {
-    if (t.done) continue;
-    const spot = CONFIG.TASK_SPOTS.find((s) => s.id === t.id);
-    const dist = Math.hypot(myPos.x - spot.x, myPos.y - spot.y);
-    if (dist <= CONFIG.TASK_RANGE) return t;
-  }
-  return null;
-}
-
-function nearestKillTarget(state) {
-  if (!state.youAreMole) return null;
+function nearestBody(doors) {
+  if (!S.you.alive || S.you.inVent) return null;
   let best = null;
-  let bestDist = Infinity;
-  for (const p of state.players) {
-    if (p.id === myId || !p.alive || p.isMole) continue;
-    const dist = Math.hypot(myPos.x - p.x, myPos.y - p.y);
-    if (dist <= CONFIG.KILL_RANGE && dist < bestDist) {
-      best = p;
-      bestDist = dist;
-    }
+  for (const b of S.bodies) {
+    const d = distTo(b);
+    if (d <= CONFIG.REPORT_RANGE - 8 && (!best || d < best.d) && MAP.lineOfSight(myPos.x, myPos.y, b.x, b.y, doors)) best = { body: b, d };
   }
-  return best;
+  return best && best.body;
 }
 
-function nearestBody(state) {
+function killTarget(doors) {
+  const you = S.you;
+  if (!you.isImpostor || !you.alive || you.inVent) return null;
   let best = null;
-  let bestDist = Infinity;
-  for (const b of state.bodies) {
-    const dist = Math.hypot(myPos.x - b.x, myPos.y - b.y);
-    if (dist <= CONFIG.REPORT_RANGE && dist < bestDist) {
-      best = b;
-      bestDist = dist;
+  for (const p of S.players) {
+    if (p.id === myId || !p.alive || p.isImpostor || p.inVent) continue;
+    const d = distTo(p);
+    if (d <= CONFIG.KILL_RANGE - 8 && (!best || d < best.d) && MAP.lineOfSight(myPos.x, myPos.y, p.x, p.y, doors)) best = { p, d };
+  }
+  return best && best.p;
+}
+
+function nearVent() {
+  if (!S.you.isImpostor || !S.you.alive) return null;
+  return MAP.VENTS.find((v) => distTo(v) <= CONFIG.VENT_RANGE - 8) || null;
+}
+
+function emergencyBlock() {
+  if (S.you.meetingsLeft <= 0) return 'No emergency meetings left';
+  if (S.sabotage) return 'No meetings during a sabotage';
+  const wait = Math.ceil((S.emergencyReadyAt - serverNow()) / 1000);
+  return wait > 0 ? `Button ready in ${wait}s` : '';
+}
+
+// ---------- Actions ----------
+function doUse() {
+  const target = useTarget();
+  if (!target) return;
+  const spot = target.spot;
+  if (target.kind === 'task') {
+    openMinigame(spot.game, `${spot.room}: ${spot.label}`, { kind: 'task', id: spot.id, ...TASK_OPTS[spot.id] }, () => {
+      socket.emit('do-task', { taskId: spot.id });
+      sfx('task');
+      toast('Task Completed!');
+    });
+  } else if (target.kind === 'panel') {
+    const send = (data) => socket.emit('fix-sabotage', { panelId: spot.id, ...data });
+    const game = { lights: 'switches', o2: 'keypad', reactor: 'reactorHold', comms: 'slider' }[spot.sabotage];
+    openMinigame(game, spot.label, {
+      kind: 'panel', id: spot.id, panelId: spot.id, sabotage: S.sabotage, send,
+      hint: 'Tune the dial to the green mark to restore comms.',
+    }, () => send({}));
+  } else if (target.kind === 'emergency') {
+    const blocked = emergencyBlock();
+    if (blocked) toast(blocked); else socket.emit('call-meeting');
+  } else if (target.kind === 'security') {
+    camsOpen = true;
+    $('cams-modal').classList.remove('hidden');
+  } else if (target.kind === 'admin') {
+    openMap('admin');
+  }
+}
+
+function doReport() {
+  const body = nearestBody(closedDoorRects());
+  if (body) socket.emit('report-body', { bodyId: body.id });
+}
+
+function doKill() {
+  const target = killTarget(closedDoorRects());
+  if (target && serverNow() >= S.you.killReadyAt) socket.emit('eliminate', { targetId: target.id });
+}
+
+function doVent() {
+  if (S.you.inVent) return socket.emit('vent-exit');
+  const vent = nearVent();
+  if (vent) socket.emit('vent-enter', { ventId: vent.id });
+}
+
+// ---------- Map / sabotage / admin overlay ----------
+const sabotageButtons = [];
+function sabButton(label, x, y, cls, payload) {
+  const btn = document.createElement('button');
+  btn.textContent = label;
+  btn.className = cls;
+  btn.style.left = `${(x / MAP.WORLD_W) * 100}%`;
+  btn.style.top = `${(y / MAP.WORLD_H) * 100}%`;
+  btn.addEventListener('click', () => {
+    socket.emit('sabotage', payload);
+    if (payload.type !== 'doors') closeMap();
+  });
+  $('sabotage-buttons').appendChild(btn);
+  sabotageButtons.push({ btn, payload });
+}
+{
+  const center = (id) => {
+    const r = MAP.ROOMS.find((room) => room.id === id);
+    return { x: r.x + r.w / 2, y: r.y + r.h / 2 };
+  };
+  for (const [type, roomId, label] of [['lights', 'electrical', 'LIGHTS'], ['reactor', 'reactor', 'REACTOR'], ['o2', 'o2', 'O2'], ['comms', 'communications', 'COMMS']]) {
+    const c = center(roomId);
+    sabButton(label, c.x, c.y - 45, '', { type });
+  }
+  for (const roomId of MAP.DOOR_ROOMS) {
+    const c = center(roomId);
+    sabButton('DOORS', c.x, c.y + 70, 'door', { type: 'doors', roomId });
+  }
+}
+
+function openMap(mode) {
+  if (activeGame || camsOpen) return;
+  mapMode = mode;
+  $('map-title').textContent = mode === 'sabotage' ? 'Sabotage' : mode === 'admin' ? 'Admin: who is where' : 'Map';
+  $('sabotage-buttons').classList.toggle('hidden', mode !== 'sabotage');
+  $('map-modal').classList.remove('hidden');
+}
+function closeMap() {
+  mapMode = null;
+  $('map-modal').classList.add('hidden');
+}
+function closeCams() {
+  camsOpen = false;
+  $('cams-modal').classList.add('hidden');
+}
+function closeOverlays() {
+  closeMinigame();
+  closeMap();
+  closeCams();
+}
+$('map-close').addEventListener('click', closeMap);
+$('cams-close').addEventListener('click', closeCams);
+$('map-btn').addEventListener('click', () => (mapMode ? closeMap() : openMap('map')));
+$('btn-use').addEventListener('click', () => { if (!inputBlocked()) doUse(); });
+$('btn-report').addEventListener('click', () => { if (!inputBlocked()) doReport(); });
+$('btn-kill').addEventListener('click', () => { if (!inputBlocked()) doKill(); });
+$('btn-vent').addEventListener('click', () => { if (!inputBlocked()) doVent(); });
+$('btn-sabotage').addEventListener('click', () => { if (S && S.state === 'playing') openMap('sabotage'); });
+
+function drawMapOverlay() {
+  const mapCtx = $('map-canvas').getContext('2d');
+  const me = S.players.find((p) => p.id === myId);
+  const opts = { me: me && { x: myPos.x, y: myPos.y, color: me.color } };
+  const comms = S.sabotage && S.sabotage.type === 'comms';
+  if (mapMode === 'admin') {
+    opts.me = null;
+    opts.counts = {};
+    if (!comms) {
+      for (const p of S.players) {
+        if (!p.alive) continue;
+        const pos = p.id === myId ? myPos : p;
+        const room = MAP.roomAt(pos.x, pos.y);
+        if (room) opts.counts[room.id] = (opts.counts[room.id] || 0) + 1;
+      }
     }
-  }
-  return best;
-}
-
-function nearestVent(state) {
-  if (!state.youAreMole || !CONFIG) return null;
-  return CONFIG.VENTS.find((v) => Math.hypot(myPos.x - v.x, myPos.y - v.y) <= CONFIG.VENT_RANGE) || null;
-}
-
-function updateActionPrompt(state) {
-  const task = nearestAssignedTask(state);
-  const killTarget = nearestKillTarget(state);
-  const body = nearestBody(state);
-  const vent = nearestVent(state);
-
-  if (holdingTask) {
-    actionPrompt.classList.add('hidden');
-    taskOverlay.classList.remove('hidden');
-    return;
-  }
-  taskOverlay.classList.add('hidden');
-
-  if (body) {
-    actionPrompt.textContent = `Press R to report ${body.victimName}'s body`;
-    actionPrompt.classList.remove('hidden');
-  } else if (killTarget) {
-    const onCooldown = state.lastKillAt && Date.now() - state.lastKillAt < CONFIG.KILL_COOLDOWN_MS;
-    actionPrompt.textContent = onCooldown ? 'Kill on cooldown' : `Press Q to eliminate ${killTarget.name}`;
-    actionPrompt.classList.remove('hidden');
-  } else if (vent) {
-    actionPrompt.textContent = 'Press V to vent';
-    actionPrompt.classList.remove('hidden');
-  } else if (task) {
-    actionPrompt.textContent = `Press E to ${task.label}`;
-    actionPrompt.classList.remove('hidden');
   } else {
-    actionPrompt.classList.add('hidden');
+    if (mapMode === 'map' && !comms) opts.taskIds = myTodoIds();
+    opts.panels = activePanels();
+  }
+  drawMiniMap(mapCtx, 912, 585, opts);
+  if (mapMode === 'sabotage') {
+    const t = serverNow();
+    for (const { btn, payload } of sabotageButtons) {
+      if (payload.type === 'doors') {
+        const door = S.doors[payload.roomId];
+        btn.disabled = !!door && door.readyAt > t;
+      } else {
+        btn.disabled = !!S.sabotage || S.sabotageReadyAt > t;
+      }
+    }
   }
 }
 
-// ---------- Movement + input ----------
+// ---------- Input ----------
 window.addEventListener('keydown', (e) => {
-  keys[e.key.toLowerCase()] = true;
-  if (!latestState || latestState.state !== 'playing') return;
-  const me = latestState.players.find((p) => p.id === myId);
-  if (!me || !me.alive) return;
-
-  if (e.key.toLowerCase() === 'r') {
-    const body = nearestBody(latestState);
-    if (body) socket.emit('report-body', { bodyId: body.id });
-  }
-  if (e.key.toLowerCase() === 'q') {
-    const target = nearestKillTarget(latestState);
-    if (target) socket.emit('eliminate', { targetId: target.id });
-  }
-  if (e.key.toLowerCase() === 'v' && latestState.youAreMole) {
-    const nearVent = CONFIG && CONFIG.VENTS.find((v) => Math.hypot(myPos.x - v.x, myPos.y - v.y) <= CONFIG.VENT_RANGE);
-    if (nearVent) socket.emit('use-vent');
-  }
-  if (e.key.toLowerCase() === 'e' && !holdingTask) {
-    const task = nearestAssignedTask(latestState);
-    if (task) {
-      holdingTask = task;
-      holdProgress = 0;
-      taskLabel.textContent = task.label;
-    }
-  }
+  if (e.target.tagName === 'INPUT') return;
+  const k = e.key.toLowerCase();
+  if (S && S.state !== 'lobby' && [' ', 'tab', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+  if (e.repeat) return;
+  keys[k] = true;
+  if (!S || S.state !== 'playing') return;
+  if (k === 'escape') return closeOverlays();
+  if (k === 'm' || k === 'tab') return mapMode ? closeMap() : openMap('map');
+  if (k === 'b' && S.you.isImpostor) return mapMode ? closeMap() : openMap('sabotage');
+  if (inputBlocked()) return;
+  if (k === 'e' || k === ' ') doUse();
+  if (k === 'r') doReport();
+  if (k === 'q') doKill();
+  if (k === 'v') doVent();
 });
-window.addEventListener('keyup', (e) => {
-  keys[e.key.toLowerCase()] = false;
-  if (e.key.toLowerCase() === 'e' && holdingTask) {
-    holdingTask = null;
-    holdProgress = 0;
-    taskBarFill.style.width = '0%';
-  }
-});
+window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+window.addEventListener('blur', () => { for (const k of Object.keys(keys)) keys[k] = false; });
 
 let lastMoveSent = 0;
-function tickMovement(dt) {
-  if (!latestState || latestState.state !== 'playing') return;
-  const me = latestState.players.find((p) => p.id === myId);
-  if (!me || !me.alive) return;
-  if (holdingTask) return; // frozen while doing a task
-
-  const speed = 220; // px/sec
-  let dx = 0, dy = 0;
-  if (keys['w'] || keys['arrowup']) dy -= 1;
-  if (keys['s'] || keys['arrowdown']) dy += 1;
-  if (keys['a'] || keys['arrowleft']) dx -= 1;
-  if (keys['d'] || keys['arrowright']) dx += 1;
-
-  const myWp = walkPhase.get(myId) || { phase: 0, moving: false };
-  if (dx !== 0 || dy !== 0) {
-    const len = Math.hypot(dx, dy);
-    myPos.x = Math.max(20, Math.min(canvas.width - 20, myPos.x + (dx / len) * speed * dt));
-    myPos.y = Math.max(20, Math.min(canvas.height - 20, myPos.y + (dy / len) * speed * dt));
-    myWp.moving = true;
-    myWp.phase += dt * 10;
+function tickMovement(dt, doors) {
+  myWalk.moving = false;
+  if (inputBlocked() || S.you.inVent) return;
+  let dx = 0;
+  let dy = 0;
+  if (keys.w || keys.arrowup) dy -= 1;
+  if (keys.s || keys.arrowdown) dy += 1;
+  if (keys.a || keys.arrowleft) dx -= 1;
+  if (keys.d || keys.arrowright) dx += 1;
+  if (!dx && !dy) return;
+  const len = Math.hypot(dx, dy);
+  const step = BASE_SPEED * S.settings.speed * dt;
+  const nx = myPos.x + (dx / len) * step;
+  const ny = myPos.y + (dy / len) * step;
+  if (!S.you.alive) {
+    myPos.x = Math.max(0, Math.min(MAP.WORLD_W, nx));
+    myPos.y = Math.max(0, Math.min(MAP.WORLD_H, ny));
   } else {
-    myWp.moving = false;
+    // If a door slammed on top of us, let us walk out of it.
+    const stuck = MAP.hitsDoor(myPos.x, myPos.y, doors);
+    const ok = (x, y) => MAP.isWalkable(x, y) && (stuck || !MAP.hitsDoor(x, y, doors));
+    if (ok(nx, myPos.y)) myPos.x = nx;
+    if (ok(myPos.x, ny)) myPos.y = ny;
   }
-  walkPhase.set(myId, myWp);
-
+  if (dx) myFacing = dx;
+  myWalk.moving = true;
+  myWalk.phase += dt * 14;
   const now = performance.now();
   if (now - lastMoveSent > 50) {
     lastMoveSent = now;
@@ -628,169 +450,442 @@ function tickMovement(dt) {
   }
 }
 
-function tickTaskHold(dt) {
-  if (!holdingTask) return;
-  if (!keys['e']) {
-    holdingTask = null;
-    holdProgress = 0;
-    taskBarFill.style.width = '0%';
+function tickRemote(dt) {
+  const k = 1 - Math.exp(-dt * 14);
+  for (const p of S.players) {
+    if (p.id === myId) continue;
+    let r = remote.get(p.id);
+    if (!r) { r = { x: p.x, y: p.y, facing: 1, phase: 0, moving: false }; remote.set(p.id, r); }
+    const dx = p.x - r.x;
+    const dy = p.y - r.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > 220) { r.x = p.x; r.y = p.y; r.moving = false; continue; }
+    r.moving = dist > 2;
+    if (r.moving) r.phase += dt * 14;
+    if (Math.abs(dx) > 1.5) r.facing = dx > 0 ? 1 : -1;
+    r.x += dx * k;
+    r.y += dy * k;
+  }
+}
+
+socket.on('player-moved', ({ id, x, y }) => {
+  if (!S) return;
+  const p = S.players.find((pl) => pl.id === id);
+  if (p) { p.x = x; p.y = y; }
+});
+
+// ---------- Drawing ----------
+// includeGhosts: dead players are drawn (only ghosts see ghosts). selfLive: use local position for me.
+function drawEntities(c, includeGhosts, selfLive) {
+  for (const b of S.bodies) drawBody(c, b.x, b.y, b.color);
+  const list = [];
+  for (const p of S.players) {
+    if (p.inVent || (!p.alive && !includeGhosts)) continue;
+    const isMe = p.id === myId;
+    const r = isMe ? null : remote.get(p.id);
+    if (!isMe && !r) continue;
+    list.push({
+      p,
+      x: isMe ? myPos.x : r.x,
+      y: isMe ? myPos.y : r.y,
+      facing: isMe ? myFacing : r.facing,
+      moving: isMe ? (selfLive && myWalk.moving) : r.moving,
+      phase: isMe ? myWalk.phase : r.phase,
+    });
+  }
+  list.sort((a, b) => a.y - b.y);
+  for (const e of list) {
+    drawCrewmate(c, e.x, e.y, e.p.color, { facing: e.facing, moving: e.moving, phase: e.phase, ghost: !e.p.alive });
+    drawName(c, e.x, e.y - 38, e.p.name, e.p.isImpostor && S.you.isImpostor ? '#ff3b30' : '#fff');
+  }
+}
+
+function drawArrow(x, y, angle, color) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.fillStyle = color;
+  ctx.strokeStyle = '#0a0a0a';
+  ctx.lineWidth = 3;
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(20, 0); ctx.lineTo(-14, -15); ctx.lineTo(-6, 0); ctx.lineTo(-14, 15);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawArrows(camX, camY, zoom) {
+  const W = canvas.width;
+  const H = canvas.height;
+  const targets = activePanels().map((p) => ({ spot: p, color: '#ff3b30' }));
+  if (!(S.sabotage && S.sabotage.type === 'comms')) {
+    for (const id of myTodoIds()) targets.push({ spot: SPOTS[id], color: '#f5d63c' });
+  }
+  for (const { spot, color } of targets) {
+    const sx = (spot.x - camX) * zoom;
+    const sy = (spot.y - camY) * zoom;
+    if (sx > 30 && sx < W - 30 && sy > 30 && sy < H - 30) continue;
+    const angle = Math.atan2(sy - H / 2, sx - W / 2);
+    const t = Math.min((W / 2 - 46) / Math.abs(Math.cos(angle) || 1e-6), (H / 2 - 46) / Math.abs(Math.sin(angle) || 1e-6));
+    drawArrow(W / 2 + Math.cos(angle) * t, H / 2 + Math.sin(angle) * t, angle, color);
+  }
+}
+
+function drawWorld(dt, doors) {
+  const W = canvas.width;
+  const H = canvas.height;
+  const zoom = Math.max(H / 640, W / 1300);
+  const vw = W / zoom;
+  const vh = H / zoom;
+  const camX = myPos.x - vw / 2;
+  const camY = myPos.y - vh / 2;
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  drawStars(ctx, W, H, camX, camY);
+  ctx.setTransform(zoom, 0, 0, zoom, -camX * zoom, -camY * zoom);
+  drawShip(ctx, doors);
+  drawStations(ctx, myTodoIds(), activePanels(), performance.now());
+
+  if (!S.you.alive) {
+    drawEntities(ctx, true, true);
+  } else {
+    const lightsOut = S.sabotage && S.sabotage.type === 'lights' && !S.you.isImpostor;
+    const wanted = S.you.isImpostor ? 470 : lightsOut ? 110 : 360;
+    visionRadius += (wanted - visionRadius) * Math.min(1, dt * 3);
+    const poly = computeVisibility(myPos.x, myPos.y, visionRadius, doors);
+    ctx.save();
+    ctx.beginPath();
+    tracePolygon(ctx, poly);
+    ctx.clip();
+    drawEntities(ctx, false, true);
+    const fade = ctx.createRadialGradient(myPos.x, myPos.y, visionRadius * 0.55, myPos.x, myPos.y, visionRadius);
+    fade.addColorStop(0, 'rgba(0,0,0,0)');
+    fade.addColorStop(1, 'rgba(0,0,0,0.8)');
+    ctx.fillStyle = fade;
+    ctx.fillRect(camX, camY, vw, vh);
+    ctx.restore();
+    ctx.fillStyle = 'rgba(0,0,0,0.8)';
+    ctx.beginPath();
+    ctx.rect(camX - 20, camY - 20, vw + 40, vh + 40);
+    tracePolygon(ctx, poly);
+    ctx.fill('evenodd');
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  drawArrows(camX, camY, zoom);
+}
+
+function drawCams() {
+  const cv = $('cams-canvas');
+  const c = cv.getContext('2d');
+  const qw = cv.width / 2;
+  const qh = cv.height / 2;
+  const doors = closedDoorRects();
+  const scale = 0.72;
+  MAP.CAMERAS.forEach((cam, i) => {
+    const ox = (i % 2) * qw;
+    const oy = Math.floor(i / 2) * qh;
+    c.save();
+    c.beginPath();
+    c.rect(ox, oy, qw, qh);
+    c.clip();
+    c.fillStyle = '#05070c';
+    c.fillRect(ox, oy, qw, qh);
+    c.translate(ox + qw / 2 - cam.x * scale, oy + qh / 2 - cam.y * scale);
+    c.scale(scale, scale);
+    drawShip(c, doors);
+    drawStations(c, new Set(), [], 0);
+    drawEntities(c, false, false);
+    c.restore();
+    c.fillStyle = 'rgba(40, 255, 120, 0.07)';
+    c.fillRect(ox, oy, qw, qh);
+    c.strokeStyle = '#0a0d14';
+    c.lineWidth = 6;
+    c.strokeRect(ox, oy, qw, qh);
+    c.fillStyle = '#fff';
+    c.font = "800 16px 'Baloo 2', sans-serif";
+    c.fillText(`CAM ${i + 1}: ${cam.name}`, ox + 12, oy + 24);
+  });
+}
+
+// ---------- HUD ----------
+function setText(node, text) {
+  if (node.textContent !== text) node.textContent = text;
+}
+
+function renderTaskList(st) {
+  const list = $('task-list');
+  if (st.sabotage && st.sabotage.type === 'comms') {
+    list.innerHTML = '<div class="fake">[ Comms Sabotaged ]</div>';
     return;
   }
-  holdProgress += dt * 1000;
-  taskBarFill.style.width = `${Math.min(100, (holdProgress / HOLD_DURATION_MS) * 100)}%`;
-  if (holdProgress >= HOLD_DURATION_MS) {
-    socket.emit('do-task', { taskId: holdingTask.id });
-    holdingTask = null;
-    holdProgress = 0;
-    taskBarFill.style.width = '0%';
+  if (st.you.isImpostor) {
+    list.innerHTML = '<div class="fake">Sabotage and kill everyone.</div><div class="title">Fake tasks:</div>'
+      + MAP.TASK_SPOTS.slice(0, 4).map((s) => `<div>${s.room}: ${s.label}</div>`).join('');
+    return;
+  }
+  list.innerHTML = (st.you.alive ? '' : '<div class="title">You are dead. Finish your tasks to help the crew.</div>')
+    + st.you.tasks.map((t) => `<div class="${t.done ? 'done' : ''}">${SPOTS[t.id].room}: ${SPOTS[t.id].label}</div>`).join('');
+}
+
+function renderVentArrows(st) {
+  const box = $('vent-arrows');
+  const here = st.you.inVent && MAP.VENTS.find((v) => v.id === st.you.inVent);
+  box.classList.toggle('hidden', !here || st.state !== 'playing');
+  if (!here) return;
+  box.innerHTML = '';
+  for (const v of MAP.VENTS.filter((o) => o.group === here.group && o.id !== here.id)) {
+    const btn = document.createElement('button');
+    btn.textContent = `➤ ${MAP.placeName(v.x, v.y)}`;
+    btn.addEventListener('click', () => socket.emit('vent-move', { ventId: v.id }));
+    box.appendChild(btn);
   }
 }
 
-function tickInterpolation(dt) {
-  if (!latestState) return;
-  const lerpFactor = 1 - Math.exp(-dt * 12);
-  for (const p of latestState.players) {
-    if (p.id === myId) continue;
-    if (!renderPositions.has(p.id)) { renderPositions.set(p.id, { x: p.x, y: p.y }); continue; }
-    const rp = renderPositions.get(p.id);
-    const dist = Math.hypot(p.x - rp.x, p.y - rp.y);
-    const wp = walkPhase.get(p.id) || { phase: 0, moving: false };
-    wp.moving = dist > 1.5;
-    if (wp.moving) wp.phase += dt * 10;
-    walkPhase.set(p.id, wp);
-    rp.x += (p.x - rp.x) * lerpFactor;
-    rp.y += (p.y - rp.y) * lerpFactor;
+function updateHud(doors) {
+  const you = S.you;
+  const t = serverNow();
+  $('taskbar-fill').style.width = `${S.totalTasks ? (S.doneTasks / S.totalTasks) * 100 : 0}%`;
+  setText($('room-name'), you.inVent ? 'In the vents' : MAP.placeName(myPos.x, myPos.y));
+
+  const sab = S.sabotage;
+  const alert = $('alert');
+  alert.classList.toggle('hidden', !sab);
+  if (sab) {
+    const left = sab.endsAt ? ` in ${Math.max(0, Math.ceil((sab.endsAt - t) / 1000))}s` : '';
+    const where = { lights: 'Fix the lights in Electrical', reactor: `Reactor meltdown${left}`, o2: `Oxygen depleted${left}`, comms: 'Comms sabotaged: fix in Communications' }[sab.type];
+    setText(alert, `⚠ ${where}`);
+  }
+  $('flash').classList.toggle('crisis', !!(sab && sab.endsAt));
+
+  const target = useTarget();
+  const useLabel = !target ? 'USE' : { task: 'USE', panel: 'FIX', emergency: 'BUTTON', security: 'CAMS', admin: 'ADMIN' }[target.kind];
+  setText($('use-label'), useLabel);
+  $('btn-use').disabled = !target;
+  $('btn-report').disabled = !nearestBody(doors);
+  $('btn-report').classList.toggle('hidden', !you.alive);
+  $('btn-kill').classList.toggle('hidden', !you.isImpostor || !you.alive);
+  $('btn-vent').classList.toggle('hidden', !you.isImpostor || !you.alive);
+  $('btn-sabotage').classList.toggle('hidden', !you.isImpostor);
+  if (you.isImpostor) {
+    const cd = Math.ceil((you.killReadyAt - t) / 1000);
+    setText($('kill-cd'), cd > 0 ? String(cd) : '');
+    $('btn-kill').disabled = cd > 0 || !killTarget(doors);
+    $('btn-vent').disabled = !you.inVent && !nearVent();
   }
 }
 
+// ---------- Meeting ----------
+function renderMeeting(st) {
+  const m = st.meeting;
+  const me = st.players.find((p) => p.id === myId);
+  const caller = st.players.find((p) => p.id === m.callerId);
+  $('meeting-title').textContent = m.phase === 'results' ? 'Voting Results' : 'Who Is The Impostor?';
+  $('meeting-sub').textContent = caller
+    ? `${caller.name} ${m.reason === 'report' ? 'reported a dead body' : 'called an emergency meeting'}.` : '';
+  const canVote = m.phase === 'voting' && me && me.alive && !m.myVote;
+  const grid = $('meeting-grid');
+  grid.innerHTML = '';
+  for (const p of st.players) {
+    const card = document.createElement('div');
+    card.className = 'vote-card' + (p.alive ? '' : ' dead') + (voteSelection === p.id && canVote ? ' selected' : '')
+      + (p.isImpostor && st.you.isImpostor ? ' impostor' : '');
+    let html = `${iconImg(p.color)}<span class="vname">${esc(p.name)}</span>`;
+    if (p.id === m.callerId) html += '<span class="badge">📢</span>';
+    if (m.result) {
+      const voters = m.result.tally[p.id] || [];
+      html += `<span class="vote-dots">${voters.map((id) => voteDot(st, id)).join('')}</span>`;
+    } else if (m.voted.includes(p.id)) {
+      html += '<span class="badge">VOTED</span>';
+    }
+    card.innerHTML = html;
+    if (canVote && p.alive) {
+      card.addEventListener('click', () => { voteSelection = p.id; renderMeeting(S); });
+      if (voteSelection === p.id) {
+        const ok = document.createElement('button');
+        ok.className = 'confirm';
+        ok.textContent = '✔';
+        ok.addEventListener('click', (e) => { e.stopPropagation(); castVote(p.id); });
+        card.appendChild(ok);
+      }
+    }
+    grid.appendChild(card);
+  }
+  $('vote-skip-btn').disabled = !canVote;
+  $('skip-votes').innerHTML = m.result ? (m.result.tally.skip || []).map((id) => voteDot(st, id)).join('') : '';
+  $('chat-input').placeholder = me && me.alive ? 'Say something…' : 'Ghost chat (only the dead can read this)';
+}
+
+function voteDot(st, id) {
+  const p = st.players.find((pl) => pl.id === id);
+  return `<span class="vote-dot" style="background:${p ? COLORS[p.color].hex : '#888'}"></span>`;
+}
+
+function castVote(targetId) {
+  socket.emit('cast-vote', { targetId });
+  voteSelection = null;
+  sfx('vote');
+}
+$('vote-skip-btn').addEventListener('click', () => castVote('skip'));
+
+function updateMeetingTimer() {
+  const m = S.meeting;
+  const left = Math.max(0, Math.ceil((m.endsAt - serverNow()) / 1000));
+  const text = m.phase === 'discussion' ? `Voting begins in ${left}s`
+    : m.phase === 'voting' ? (m.myVote ? `Vote cast. Ends in ${left}s` : `Voting ends in ${left}s`)
+      : `Proceeding in ${left}s`;
+  setText($('meeting-timer'), text);
+}
+
+$('chat-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const input = $('chat-input');
+  if (input.value.trim()) socket.emit('chat', { text: input.value });
+  input.value = '';
+});
+socket.on('chat', (msg) => {
+  const log = $('chat-log');
+  const div = document.createElement('div');
+  div.className = 'chat-msg' + (msg.ghost ? ' ghost' : '');
+  div.innerHTML = `<span class="who" style="color:${COLORS[msg.color].shade}">${esc(msg.name)}${msg.ghost ? ' (ghost)' : ''}</span>${esc(msg.text)}`;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+});
+
+function showEjection(result) {
+  const img = result.ejectedId ? `<img src="${crewIcon(result.ejectedColor)}" alt="" />` : '';
+  showSplash('eject', `${img}<p id="eject-text"></p><p id="eject-remaining"></p>`, 5800);
+  const text = result.text;
+  let i = 0;
+  const timer = setInterval(() => {
+    const node = $('eject-text');
+    if (!node) return clearInterval(timer);
+    i += 1;
+    node.textContent = text.slice(0, i);
+    if (i >= text.length) {
+      clearInterval(timer);
+      $('eject-remaining').textContent = `${result.remaining} Impostor${result.remaining === 1 ? '' : 's'} remain${result.remaining === 1 ? 's' : ''}.`;
+    }
+  }, 45);
+}
+
+// ---------- End screen ----------
+function renderEnd(st) {
+  const me = st.players.find((p) => p.id === myId);
+  const won = !!me && (st.winner === 'impostor') === !!me.isImpostor;
+  $('end-screen').classList.toggle('defeat', !won);
+  $('end-title').textContent = won ? 'VICTORY' : 'DEFEAT';
+  $('end-message').textContent = `${st.winner === 'impostor' ? 'Impostors win.' : 'Crewmates win.'} ${st.winReason}`;
+  const winners = st.players.filter((p) => (st.winner === 'impostor') === !!p.isImpostor);
+  $('end-lineup').innerHTML = winners.map((p) => iconImg(p.color)).join('');
+  $('end-roles').innerHTML = st.players.map((p) => `<li class="${p.isImpostor ? 'imp' : ''}">${iconImg(p.color)}${esc(p.name)}: ${p.isImpostor ? 'Impostor' : 'Crewmate'}</li>`).join('');
+  $('again-btn').classList.toggle('hidden', !me || !me.isHost);
+  $('end-hint').classList.toggle('hidden', !!(me && me.isHost));
+}
+
+// ---------- Main loop ----------
 function loop() {
   const now = performance.now();
   const dt = Math.min(0.05, (now - lastFrameTime) / 1000);
   lastFrameTime = now;
-
-  tickMovement(dt);
-  tickTaskHold(dt);
-  tickInterpolation(dt);
-  updateEffects(dt);
-  if (latestState && latestState.state === 'playing') {
-    drawWorld(latestState);
-    updateActionPrompt(latestState);
+  if (S && S.state !== 'lobby' && S.you) {
+    const doors = closedDoorRects();
+    tickMovement(dt, doors);
+    tickRemote(dt);
+    drawWorld(dt, doors);
+    if (S.state === 'playing') updateHud(doors);
+    if (S.state === 'meeting') updateMeetingTimer();
+    if (mapMode) drawMapOverlay();
+    if (camsOpen) drawCams();
   }
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
 
-socket.on('player-moved', ({ id, x, y }) => {
-  if (!latestState) return;
-  const p = latestState.players.find((pl) => pl.id === id);
-  if (p) { p.x = x; p.y = y; }
+// ---------- Server events ----------
+socket.on('connect', () => { myId = socket.id; });
+socket.on('disconnect', () => {
+  S = null;
+  closeOverlays();
+  showScreen('menu');
+  menuError.textContent = 'Disconnected from the server.';
 });
 
-// ---------- Meeting ----------
-let myVote = null;
-function renderMeeting(state) {
-  document.getElementById('meeting-message').textContent = state.resultMessage || 'A body was found. Discuss!';
-  const list = document.getElementById('meeting-players');
-  list.innerHTML = '';
-  const me = state.players.find((p) => p.id === myId);
-  for (const p of state.players) {
-    const li = document.createElement('li');
-    const nameSpan = document.createElement('span');
-    nameSpan.className = 'name-row';
-    nameSpan.innerHTML = `<span class="dot" style="background:${p.color};color:${p.color}"></span>${p.name}${!p.alive ? '<span class="dead-tag">dead</span>' : ''}`;
-    li.appendChild(nameSpan);
-    if (p.alive && me && me.alive) {
-      const btn = document.createElement('button');
-      btn.className = 'vote-btn' + (myVote === p.id ? ' voted' : '');
-      btn.textContent = p.id === myId ? 'Vote (self)' : 'Vote';
-      btn.disabled = !!myVote;
-      btn.addEventListener('click', () => castVote(p.id));
-      li.appendChild(btn);
+socket.on('you-died', ({ killerColor }) => {
+  closeOverlays();
+  sfx('kill');
+  showSplash('killed', `<h1>YOU WERE KILLED</h1>${iconImg(killerColor)}<p>You are a ghost now. You can still finish your tasks.</p>`, 2600);
+});
+
+socket.on('state', (st) => {
+  clockOffset = st.serverNow - Date.now();
+  const prev = S;
+  const prevState = prev ? prev.state : 'lobby';
+  S = st;
+  const me = st.players.find((p) => p.id === myId);
+
+  if (st.state === 'lobby') {
+    closeOverlays();
+    remote.clear();
+    $('chat-log').innerHTML = '';
+    $('meeting').classList.add('hidden');
+    $('end-screen').classList.add('hidden');
+    splash.classList.add('hidden');
+    showScreen('lobby');
+    renderLobby(st);
+    return;
+  }
+  showScreen('game');
+
+  const teleported = prevState !== st.state || (prev && prev.you && prev.you.inVent !== st.you.inVent) || !!st.you.inVent;
+  if (me && (teleported || Math.hypot(me.x - myPos.x, me.y - myPos.y) > 90)) {
+    myPos.x = me.x;
+    myPos.y = me.y;
+  }
+
+  if (st.state === 'playing' && (prevState === 'lobby' || prevState === 'ended')) {
+    closeOverlays();
+    const n = st.players.length;
+    const count = Math.min(st.settings.impostors, n >= 9 ? 3 : n >= 7 ? 2 : 1);
+    if (st.you.isImpostor) {
+      const team = st.players.filter((p) => p.isImpostor);
+      showSplash('impostor', `<h1>IMPOSTOR</h1><p>Kill the crew. Don't get caught.</p><div class="lineup">${team.map((p) => iconImg(p.color)).join('')}</div>`, 3800);
+    } else {
+      showSplash('crew', `<h1>CREWMATE</h1><p>There ${count === 1 ? 'is <b style="color:#ff3b30">1 Impostor</b>' : `are <b style="color:#ff3b30">${count} Impostors</b>`} among us.</p><div class="lineup">${st.players.map((p) => iconImg(p.color)).join('')}</div>`, 3800);
     }
-    list.appendChild(li);
   }
-  document.getElementById('vote-skip-btn').disabled = !!myVote || !(me && me.alive);
-  const votes = state.votes;
-  document.getElementById('meeting-timer').textContent = votes ? `${votes.cast}/${votes.aliveCount} voted` : '';
-}
 
-function castVote(targetId) {
-  if (myVote) return;
-  myVote = targetId;
-  socket.emit('cast-vote', { targetId });
-}
-
-// ---------- End screen ----------
-function renderEnd(state) {
-  document.getElementById('end-title').textContent = state.resultMessage?.includes('Impostor wins') ? 'Impostor Wins' : 'Crew Wins';
-  document.getElementById('end-message').textContent = state.resultMessage || '';
-  const list = document.getElementById('end-roles');
-  list.innerHTML = '';
-  for (const p of state.players) {
-    const li = document.createElement('li');
-    li.innerHTML = `<span class="name-row"><span class="dot" style="background:${p.color};color:${p.color}"></span>${p.name}</span><span>${p.isMole ? 'IMPOSTOR' : 'Crew'}</span>`;
-    list.appendChild(li);
+  if (st.state === 'meeting' && prevState !== 'meeting') {
+    closeOverlays();
+    voteSelection = null;
+    sfx('meeting');
+    const report = st.meeting.reason === 'report';
+    showSplash('alarm', `<h1>${report ? 'DEAD BODY REPORTED' : 'EMERGENCY MEETING'}</h1>${report && st.meeting.bodyColor !== null ? iconImg(st.meeting.bodyColor) : ''}`, 2400);
   }
-  const me = state.players.find((p) => p.id === myId);
-  document.getElementById('again-btn').classList.toggle('hidden', !me || !me.isHost);
-}
+  if (st.state === 'meeting') {
+    const prevPhase = prev && prev.meeting ? prev.meeting.phase : null;
+    if (st.meeting.phase === 'ejection' && prevPhase !== 'ejection') showEjection(st.meeting.result);
+    renderMeeting(st);
+  }
+  $('meeting').classList.toggle('hidden', st.state !== 'meeting' || st.meeting.phase === 'ejection');
 
-// ---------- Main state handler ----------
-socket.on('connect', () => { myId = socket.id; });
+  if (st.state === 'ended' && prevState !== 'ended') {
+    closeOverlays();
+    splash.classList.add('hidden');
+    renderEnd(st);
+  }
+  $('end-screen').classList.toggle('hidden', st.state !== 'ended');
+  $('hud').classList.toggle('hidden', st.state !== 'playing');
 
-socket.on('state', (state) => {
-  if (state.state === 'playing') {
-    for (const p of state.players) {
-      const wasAlive = prevAliveById.get(p.id);
-      if (wasAlive === true && p.alive === false) {
-        const pos = p.id === myId ? myPos : (renderPositions.get(p.id) || p);
-        spawnBurst(pos.x, pos.y, '#cfcfcf', 16, { shape: 'paper', speed: 130, lift: 70 });
-        triggerShake(10);
-        triggerFlash();
-      }
-      prevAliveById.set(p.id, p.alive);
+  if (st.state === 'playing') {
+    if (st.sabotage && !(prev && prev.sabotage)) sfx('alarm');
+    if (activeGame && activeGame.kind === 'panel') {
+      if (!st.sabotage) closeMinigame();
+      else if (activeGame.update) activeGame.update(st.sabotage);
     }
-
-    if (!state.youAreMole) {
-      const doneNow = new Set(state.yourTasks.filter((t) => t.done).map((t) => t.id));
-      for (const id of doneNow) {
-        if (!prevMyDoneTaskIds.has(id)) {
-          const spot = CONFIG && CONFIG.TASK_SPOTS.find((s) => s.id === id);
-          if (spot) spawnBurst(spot.x, spot.y, '#e0b955', 14, { shape: 'confetti', speed: 100, lift: 90 });
-        }
-      }
-      prevMyDoneTaskIds = doneNow;
-    }
-  } else if (state.state === 'lobby') {
-    prevAliveById = new Map();
-    prevMyDoneTaskIds = new Set();
-    renderPositions.clear();
-    particles = [];
+    if (st.you.inVent) closeOverlays();
+    renderTaskList(st);
   }
-
-  latestState = state;
-  if (state.state !== 'meeting') myVote = null;
-
-  switch (state.state) {
-    case 'lobby':
-      showScreen('lobby');
-      renderLobby(state);
-      break;
-    case 'playing':
-      showScreen('game');
-      renderHud(state);
-      {
-        const me = state.players.find((p) => p.id === myId);
-        if (me) { myPos.x = me.x; myPos.y = me.y; }
-      }
-      break;
-    case 'meeting':
-      showScreen('meeting');
-      renderMeeting(state);
-      break;
-    case 'ended':
-      showScreen('end');
-      renderEnd(state);
-      break;
-  }
+  renderVentArrows(st);
 });

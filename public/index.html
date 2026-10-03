@@ -4,73 +4,149 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Crewmates</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
 
 <div id="screen-menu" class="screen active">
-  <h1>Crewmates</h1>
-  <p class="tagline">One of you is not a crewmate.</p>
-  <input id="name-input" type="text" placeholder="Your name" maxlength="16" />
-
-  <div class="menu-card">
-    <h2>Create a game</h2>
-    <button id="create-btn">Create Room</button>
+  <div class="stars"></div>
+  <div class="menu-inner">
+    <h1 class="logo">CREWMATES</h1>
+    <p class="tagline">There is an Impostor among us.</p>
+    <input id="name-input" type="text" placeholder="Your name" maxlength="12" />
+    <div class="menu-row">
+      <div class="menu-card">
+        <h2>Host</h2>
+        <button id="create-btn">Create Game</button>
+      </div>
+      <div class="menu-card">
+        <h2>Join</h2>
+        <input id="join-code-input" type="text" placeholder="CODE" maxlength="4" />
+        <button id="join-btn">Join Game</button>
+      </div>
+    </div>
+    <p id="menu-error" class="error"></p>
   </div>
-
-  <div class="menu-card">
-    <h2>Join a game</h2>
-    <input id="join-code-input" type="text" placeholder="ROOM CODE" maxlength="4" style="text-transform:uppercase" />
-    <button id="join-btn">Join Room</button>
-  </div>
-
-  <p id="menu-error" class="error"></p>
 </div>
 
 <div id="screen-lobby" class="screen">
-  <h1>Lobby — <span id="lobby-code"></span></h1>
-  <ul id="lobby-players"></ul>
-  <button id="start-btn">Start Game</button>
-  <p id="lobby-hint" class="hint">Waiting for the host to start&hellip;</p>
+  <div class="stars"></div>
+  <div class="lobby-inner">
+    <h1>Code: <span id="lobby-code"></span></h1>
+    <p class="hint">Share the code. Other players open this page and join.</p>
+    <div class="lobby-cols">
+      <div class="panel">
+        <h2>Crew <span id="lobby-count"></span></h2>
+        <ul id="lobby-players"></ul>
+        <button id="add-bot-btn">+ Add AI Player</button>
+      </div>
+      <div class="panel">
+        <h2>Color</h2>
+        <div id="color-picker"></div>
+        <h2>Game Settings</h2>
+        <div id="settings"></div>
+      </div>
+    </div>
+    <button id="start-btn">Start</button>
+    <p id="lobby-hint" class="hint">Waiting for the host to start&hellip;</p>
+  </div>
 </div>
 
 <div id="screen-game" class="screen">
+  <canvas id="game-canvas"></canvas>
+  <div id="flash"></div>
+
   <div id="hud">
-    <div id="hud-left">Tasks: <span id="hud-tasks">0/0</span></div>
-    <button id="call-meeting-btn" class="skip-btn">Call Meeting</button>
-    <div id="hud-role" class="hud-role"></div>
+    <div id="hud-topleft">
+      <div id="taskbar"><div id="taskbar-fill"></div><span>TOTAL TASKS COMPLETED</span></div>
+      <div id="task-list"></div>
+    </div>
+    <div id="hud-topcenter">
+      <div id="room-name"></div>
+      <div id="alert" class="hidden"></div>
+    </div>
+    <div id="hud-topright">
+      <button id="map-btn" class="round-btn" title="Map (M)">MAP</button>
+    </div>
+    <div id="toast" class="hidden"></div>
+    <div id="vent-arrows" class="hidden"></div>
+    <div id="hud-actions">
+      <button id="btn-sabotage" class="act-btn act-sabotage hidden"><b>SABOTAGE</b><i>B</i></button>
+      <button id="btn-vent" class="act-btn act-vent hidden"><b>VENT</b><i>V</i></button>
+      <button id="btn-kill" class="act-btn act-kill hidden"><b>KILL</b><i>Q</i><span id="kill-cd"></span></button>
+      <button id="btn-report" class="act-btn act-report"><b>REPORT</b><i>R</i></button>
+      <button id="btn-use" class="act-btn act-use"><b id="use-label">USE</b><i>E</i></button>
+    </div>
+    <div id="controls-hint">WASD / arrows to move &middot; E use &middot; R report &middot; M map</div>
   </div>
-  <div id="canvas-wrap">
-    <canvas id="game-canvas" width="800" height="600"></canvas>
-    <div id="vignette"></div>
-    <div id="flash"></div>
-  </div>
-  <div id="action-prompt" class="action-prompt hidden"></div>
-  <div id="task-overlay" class="overlay hidden">
-    <div class="task-box">
-      <h3 id="task-label"></h3>
-      <div class="task-bar"><div id="task-bar-fill"></div></div>
-      <p class="hint">Hold E to complete</p>
+
+  <div id="task-modal" class="overlay hidden">
+    <div class="task-panel">
+      <button id="task-close" class="close-btn">&times;</button>
+      <h3 id="task-title"></h3>
+      <div id="task-body"></div>
     </div>
   </div>
-</div>
 
-<div id="screen-meeting" class="screen">
-  <h1>Emergency Meeting</h1>
-  <p id="meeting-message"></p>
-  <div id="meeting-timer" class="hint"></div>
-  <ul id="meeting-players"></ul>
-  <button id="vote-skip-btn" class="skip-btn">Skip Vote</button>
-</div>
+  <div id="map-modal" class="overlay hidden">
+    <div class="map-panel">
+      <button id="map-close" class="close-btn">&times;</button>
+      <h3 id="map-title">Map</h3>
+      <div id="map-wrap">
+        <canvas id="map-canvas" width="912" height="585"></canvas>
+        <div id="sabotage-buttons"></div>
+      </div>
+    </div>
+  </div>
 
-<div id="screen-end" class="screen">
-  <h1 id="end-title"></h1>
-  <p id="end-message"></p>
-  <ul id="end-roles"></ul>
-  <button id="again-btn">Back to Lobby</button>
+  <div id="cams-modal" class="overlay hidden">
+    <div class="map-panel">
+      <button id="cams-close" class="close-btn">&times;</button>
+      <h3>Security Cameras</h3>
+      <canvas id="cams-canvas" width="900" height="560"></canvas>
+    </div>
+  </div>
+
+  <div id="meeting" class="hidden">
+    <div class="tablet">
+      <div class="tablet-main">
+        <h2 id="meeting-title">Who Is The Impostor?</h2>
+        <p id="meeting-sub"></p>
+        <div id="meeting-grid"></div>
+        <div class="meeting-footer">
+          <button id="vote-skip-btn" class="skip-btn">SKIP VOTE</button>
+          <span id="skip-votes"></span>
+          <span id="meeting-timer"></span>
+        </div>
+      </div>
+      <div class="tablet-chat">
+        <div id="chat-log"></div>
+        <form id="chat-form">
+          <input id="chat-input" type="text" maxlength="120" placeholder="Say something&hellip;" autocomplete="off" />
+          <button type="submit">Send</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div id="splash" class="hidden"></div>
+
+  <div id="end-screen" class="hidden">
+    <h1 id="end-title"></h1>
+    <p id="end-message"></p>
+    <div id="end-lineup"></div>
+    <ul id="end-roles"></ul>
+    <button id="again-btn">Play Again</button>
+    <p id="end-hint" class="hint">Waiting for the host&hellip;</p>
+  </div>
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
+<script src="map.js"></script>
+<script src="render.js"></script>
+<script src="tasks.js"></script>
 <script src="game.js"></script>
 </body>
 </html>
